@@ -20,23 +20,29 @@ class LevelScheme:
         self.__post_init__()
 
     def __post_init__(self):
+        total_prob = 0
+        for (level, vb) in self.vibrational_branching.items():
+            total_prob += vb
+        if (abs(total_prob - 1.) >= 1e-14):
+            raise SystemExit(f"Total Probability of vibrational_branching equals {total_prob} != 1")
+        
         self.isat = self.compute_isat()
 
 
     def compute_isat(self): # 10.1088/1367-2630/15/5/053034
-        # Note to self: ask if this is correct, there are contradicting formulas on the internet abt this
         isat = {}
 
         for level, vb in self.vibrational_branching.items():
-            # need to adjust for FC factor with self.decay_rate * vb? 
             w = self.wavelength[level]
             n = self.degeneracy_factor[level]
-            isat[level] = n * np.pi * scp.constants.c * scp.constants.h * self.decay_rate / (3 *w**3 * vb) # need n? 
+            isat[level] =  np.pi * scp.constants.c * scp.constants.h * self.decay_rate * vb / (3 *w**3) # need n? 
 
         return isat
     
     def print_isat(self):
         print(self.isat)
+
+
 
 
 class Level(Enum):
@@ -56,24 +62,22 @@ class Laser:
 
     mu: float
     sigma: float
+    I0: float
     profile: callable = field(init=False, repr=False)
 
     def __post_init__(self):
         def tophat(x, y, z):
             # propagating along x
-            I0 = 1 / (self.sigma * np.sqrt(2 * np.pi)) / 10
-
             y = np.asarray(y)
             edge_width = 0.01 * self.sigma 
 
             left_edge = 1 / (1 + np.exp(-(y - (self.mu - self.sigma)) / edge_width))
             right_edge = 1 / (1 + np.exp((y - (self.mu + self.sigma)) / edge_width))
 
-            return I0 * left_edge * right_edge
+            return self.I0 * left_edge * right_edge
         
         def gaussian(x, y, z):
             # propagating along x
-            I0 = 1/(self.sigma * np.sqrt(2*np.pi)) / 10
-            return I0 * np.exp(-0.5 * ((y-self.mu)**2 + z**2) / self.sigma**2)
+            return self.I0 * np.exp(-0.5 * ((y-self.mu)**2 + z**2) / self.sigma**2)
 
         self.profile = gaussian

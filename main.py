@@ -2,24 +2,12 @@ import numpy as np
 from trajectory import Trajectory
 import scipy as scp
 from level_scheme import Level, LevelScheme, Laser
+import level_scheme
 import matplotlib.pyplot as plt
 
 """
 Simulation: YbF molecule going through one laser pumping X^2\Sigma(v=0) -> A^2\Pi_{1/2}(v=0) with gaussian profile centred at y = mu and sigma std
 
-
-To Do: 
-Confirm values
-- detuning
-- wavelengths
-- mu, sigma i.e. laser profile
-- degeneracy factors (Somehow dependant on hyperfine + Glebsch-Gordon)
-
-Confirm physics
-- How do degeneracy factors affect saturation intensity
-- Is Frank-Condon factor up (v1 -> v0) affected by vibrational branching ratio?
-- Relationship decay rate of spontaneous emission and gamma  (gamma = dr / 2)? [Removed /2 for now]
-- Lambda = (gamma*s) / (1 + s + (2*delta*gamma)**2 ) OR (gamma*s) / (1 + (2*delta*gamma)**2 )?
 
 Simulation
 - Time resolution? 
@@ -42,20 +30,36 @@ def solve_transit(level_scheme, laser, particle, tau):
     )
     return sol
 
-def main():
-    tau = 6e-5
-    vy = 170
+def YbF_wavelength():
+    """
+    552 and 568 given by https://doi.org/10.48550/arXiv.1712.02868
+    v2 and v3 have to be calculated from https://doi.org/10.48550/arXiv.1110.1868 with Dunham expansion parameteres https://en.wikipedia.org/wiki/Dunham_expansion
+    Assume D_e', B_e', D_e', D_e'' << \omega_e'' = 506.674, \omega_e x'' = 2.245 and offset cancels
+    E = T_e + \omega_e (v + 1/2) - \omega_e x (v + 1/2)^2
+    \v_{0i} = T_e' + 1/2 \omega' - 1/4 \omega' x' - \omega''(v + 1/2) + \omega x'' (v + 1/2)^2
+    use \v_{00} = 18106 cm^-1 to find T_e' = 18091 cm^-1
+    \v_{01} = 17604 cm^-1, \v_{02} = 17091.68, \v_{03} = 16593.25
+    \lambda_{0i} = 10^7 / \v_{0i} 
+    """
+    return {Level.g: 552e-9, Level.v1: 568e-9, Level.v2: 585e-9, Level.v3: 602e-9}
 
-    mu = 0.5 * vy * tau
-    sigma = 0.08 * vy * tau
+
+def main():
+    tau = 20e-5
+    vy = 170 # ms^-1
+
+    mu = 0.5 * vy * tau # centre
+    sigma = 0.00245 # m
+    I0 = 210 # Wm^-2
 
     dr = 1/(28e-9)  # https://doi.org/10.1039/c1cp21585j # decay rate for e state
     YbF = LevelScheme(decay_rate = dr, 
-                        vibrational_branching = {Level.g: 0.932, Level.v1: 0.065, Level.v2: 0.00299, Level.v3: 0.00001}, 
-                        wavelength={Level.g: 552e-9, Level.v1: 568e-9, Level.v2: 584e-9, Level.v3: 600e-9}, # NEED TO FIND ACTUAL VALUES
-                        degeneracy_factor = {Level.g: 1, Level.v1: 1, Level.v2: 1, Level.v3: 1, Level.e: 1})
+                        vibrational_branching = {Level.g: 0.9307, Level.v1: 0.066, Level.v2: 0.003, Level.v3: 0.0003}, 
+                        wavelength=YbF_wavelength(), 
+                        degeneracy_factor = {Level.g: 12, Level.v1: 12, Level.v2: 12, Level.v3: 12, Level.e: 4}) # Need to set true degeneracy factors
 
-    laser = Laser(target_v = Level.g, detuning = 6.5e6, wavelength=552e-9, mu =mu, sigma=sigma) # FIND REAL LASER PARAMETERS mu sigma
+    YbF.print_isat()
+    laser = Laser(target_v = Level.g, detuning = 0, wavelength=552e-9, mu =mu, sigma=sigma, I0 = I0) # P(1), I0 in Wm^-2
 
     p1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0, N0 = [1.0,0.0,0.0,0.0,0.0])
     sol = solve_transit(YbF, laser, p1, tau)
@@ -76,7 +80,6 @@ def plot_results(sol, level_scheme, laser, trajectory, tau):
  
     y = trajectory.v_y * t_plot
     I_profile = laser.profile(trajectory.x_0, y, trajectory.z_0)
-    print(I_profile)
  
     fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
  
@@ -94,8 +97,8 @@ def plot_results(sol, level_scheme, laser, trajectory, tau):
     ax.set_ylabel("excited-state population", color='tab:red')
     ax.tick_params(axis='y', labelcolor='tab:red')
     ax2 = ax.twinx()
-    ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity (norm.)")
-    ax2.set_ylabel("laser intensity (unnormalized)", color='gray')
+    ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
+    ax2.set_ylabel(r"laser intensity (unnormalized) / $\text{Wm}^{-2}$", color='gray')
     ax.set_title("Excited-state population vs. laser intensity envelope")
  
     ax = axes[2]
@@ -106,6 +109,7 @@ def plot_results(sol, level_scheme, laser, trajectory, tau):
     ax.set_title("Population conservation check")
  
     fig.tight_layout()
+    plt.show()
  
 
 
