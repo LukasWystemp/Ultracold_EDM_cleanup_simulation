@@ -56,23 +56,27 @@ def main():
     YbF = LevelScheme(decay_rate = dr, 
                         vibrational_branching = {Level.g: 0.9307, Level.v1: 0.066, Level.v2: 0.003, Level.v3: 0.0003}, 
                         wavelength=YbF_wavelength(), 
-                        degeneracy_factor = {Level.g: 12, Level.v1: 12, Level.v2: 12, Level.v3: 12, Level.e: 4}) # Need to set true degeneracy factors
+                        degeneracy_factor = {Level.g: 12, Level.v1: 12, Level.v2: 12, Level.v3: 12, Level.e: 4})
 
     YbF.print_isat()
     laser = Laser(target_v = Level.g, detuning = 0, wavelength=552e-9, mu =mu, sigma=sigma, I0 = I0) # P(1), I0 in Wm^-2
 
-    p1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0, N0 = [1.0,0.0,0.0,0.0,0.0])
+    p1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0, N0 = [1.0,0.0,0.0,0.0,0.0,0.0])
     sol = solve_transit(YbF, laser, p1, tau)
     print(sol.message, " n_eval:", sol.t.size)
     
     M_mid = p1.build_rate_matrix(tau / 2, YbF, laser)
-    col_sums = M_mid.sum(axis=0)
+    col_sums = M_mid[:5, :5].sum(axis=0) # exclude photon_count row, one-way accumulator
     print("Column sums of M at t=tau/2 (should be ~0):", col_sums)
+
+
+    n_photons_final = sol.y[5, -1]
+    print(f"Photons radiated over transit: {n_photons_final:.3f}")
+
+    plot_results(sol, YbF, laser, p1, tau, dr, n_photons_final)
  
-    plot_results(sol, YbF, laser, p1, tau)
  
- 
-def plot_results(sol, level_scheme, laser, trajectory, tau):
+def plot_results(sol, level_scheme, laser, trajectory, tau, dr, n_photons_final):
     t_plot = np.linspace(0, tau, 2000)
     N = sol.sol(t_plot)
  
@@ -81,11 +85,12 @@ def plot_results(sol, level_scheme, laser, trajectory, tau):
     y = trajectory.v_y * t_plot
     I_profile = laser.profile(trajectory.x_0, y, trajectory.z_0)
  
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(8, 12), sharex=True)
  
     ax = axes[0]
+    colours = ["tab:blue", "tab:orange", "tab:green", "tab:purple", "tab:red"]
     for i in range(5):
-        ax.plot(t_plot * 1e6, N[i], label=labels[i])
+        ax.plot(t_plot * 1e6, N[i], label=labels[i], color=colours[i])
     ax.set_yscale('log')
     ax.set_ylabel("ground-state population")
     ax.set_ylim(1e-6, 2)
@@ -100,9 +105,20 @@ def plot_results(sol, level_scheme, laser, trajectory, tau):
     ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
     ax2.set_ylabel(r"laser intensity (unnormalized) / $\text{Wm}^{-2}$", color='gray')
     ax.set_title("Excited-state population vs. laser intensity envelope")
- 
+
     ax = axes[2]
-    total = N.sum(axis=0)
+    ax.plot(t_plot * 1e6, N[5], color='tab:purple', label="photons radiated")
+    ax.set_ylabel("cumulative photon count")
+    ax.set_title("Radiation profile: photons emitted vs. time")
+    ax.text(0.85, 0.15, f"Total photons: {n_photons_final:.2f}", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, bbox=dict(facecolor='tab:purple', alpha=0.5))
+
+    ax = axes[3]
+    ax.plot(t_plot*1e6, dr*N[4]*1e-6, color='tab:purple', label="Photon emission")
+    ax.set_ylabel("Photon emission")
+    ax.set_title("Radiation profile: photons emitted per unit time")
+ 
+    ax = axes[4]
+    total = N[:5].sum(axis=0)
     ax.plot(t_plot * 1e6, total - 1.0)
     ax.set_ylabel("total population - 1\n(conservation check)")
     ax.set_xlabel("time (microseconds)")

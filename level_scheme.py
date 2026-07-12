@@ -35,7 +35,7 @@ class LevelScheme:
         for level, vb in self.vibrational_branching.items():
             w = self.wavelength[level]
             n = self.degeneracy_factor[level]
-            isat[level] =  np.pi * scp.constants.c * scp.constants.h * self.decay_rate * vb / (3 *w**3) # need n? 
+            isat[level] =  np.pi * scp.constants.c * scp.constants.h * self.decay_rate * vb / (3 *w**3)
 
         return isat
     

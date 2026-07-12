@@ -29,12 +29,14 @@ class Trajectory:
         Lambda[laser.target_v.value] = Gamma * pre_fac * s / (1 + s + (2*delta/Gamma)**2)
         
 
-        M = np.zeros((5,5)) # order: v0,v1,v2,v3,excited
+        M = np.zeros((6,6)) # order: v0,v1,v2,v3,excited, photon_counter
         for i, (level, vb) in enumerate(q.items()):
             M[i, i]   -= Lambda[i]
             M[i, 4]   += Gamma * vb
             M[4, i]   += Lambda[i]
         M[4, 4] -= Gamma
+
+        M[5, 4] += Gamma # photon emission is Gamma * N_e, only inflow, no outflow
         return M 
     
 
