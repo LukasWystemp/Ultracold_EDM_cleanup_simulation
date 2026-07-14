@@ -50,7 +50,7 @@ class Trajectory:
         dp_i(n,t)/dt = - \sum_k R_{i->k} p_i(n,t) + \sum_{j \in nc} R_{j->i} p_j(n,t) + \sum_{j \in c} R_{j->i} p_j(n-1,t)
         P_i(t) = \sum_n p_i(n,t) is the population vector
         P1_i(t) = E(N 1_i) = \sum_n n p_i(n,t) and P2_i(t) = E(N(N-1) 1_i) = \sum_n n(n-1) p_i(n,t) are the first and second moments
-        For P1, multiply by n and sum over n, then re-index last term, similar for P2 but n(n-1)
+        For P1, multiply by n and sum over n, then re-index last term, similar for P2 with n(n-1)
         dP/dt = M P 
         dP1(t)/dt = M P1 + \sum_{j \in c} R_{j->i} P_j(t)
         dP2(t)/dt = M P2 + 2 \sum_j{j->i} P1_j(t)
