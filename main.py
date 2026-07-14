@@ -4,6 +4,7 @@ import scipy as scp
 from level_scheme import Level, LevelScheme, Laser
 import level_scheme
 import matplotlib.pyplot as plt
+from photon_statistics import solve_moments, analytic_std
 
 """
 Simulation: YbF molecule going through one laser pumping X^2\Sigma(v=0) -> A^2\Pi_{1/2}(v=0) with gaussian profile centred at y = mu and sigma std
@@ -73,7 +74,27 @@ def main():
     n_photons_final = sol.y[5, -1]
     print(f"Photons radiated over transit: {n_photons_final:.3f}")
 
-    plot_results(sol, YbF, laser, p1, tau, dr, n_photons_final)
+    #plot_results(sol, YbF, laser, p1, tau, dr, n_photons_final)
+
+    sol_moments = solve_moments(YbF, laser, p1, tau)
+    t = np.linspace(0, tau, 8000)
+    mean_analytic, std_analytic = analytic_std(sol_moments, t)
+    print(mean_analytic, std_analytic)
+    plot_photon_statistics(t, mean_analytic, std_analytic)
+
+
+def plot_photon_statistics(t, mean_analytic, std_analytic):
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+ 
+    #ax = axes[0]
+    ax.plot(t * 1e6, mean_analytic, color='tab:blue', label='mean photon count')
+    ax.fill_between(t * 1e6, mean_analytic - std_analytic, mean_analytic + std_analytic, color='tab:blue', alpha=0.25,
+                     label=r'$\pm 1\sigma$ (exact, analytic)')
+    ax.axhline(14.9, color='k', linestyle=':', label='lit. average (14.9)')
+    ax.set_ylabel("photon count")
+    ax.set_xlabel("time (microseconds)")
+    ax.set_title("Exact mean $\\pm$ 1 std.dev of photon count (moment-hierarchy ODE)")
+    ax.legend(loc='upper left')
  
  
 def plot_results(sol, level_scheme, laser, trajectory, tau, dr, n_photons_final):
@@ -109,7 +130,7 @@ def plot_results(sol, level_scheme, laser, trajectory, tau, dr, n_photons_final)
     ax = axes[2]
     ax.plot(t_plot * 1e6, N[5], color='tab:purple', label="photons radiated")
     ax.set_ylabel("cumulative photon count")
-    ax.set_title("Radiation profile: photons emitted vs. time")
+    ax.set_title("Radiation profile: Total photons emitted")
     ax.text(0.85, 0.15, f"Total photons: {n_photons_final:.2f}", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, bbox=dict(facecolor='tab:purple', alpha=0.5))
 
     ax = axes[3]
