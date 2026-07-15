@@ -9,26 +9,26 @@ class Trajectory:
     z_0: float
     N0: np.ndarray
 
-    def build_rate_matrix(self, t, level_scheme, laser):
+    def build_rate_matrix(self, t, level_scheme, lasers_list):
         y = self.v_y * t
         q = level_scheme.vibrational_branching
 
         Lambda = np.zeros(5) # pumping rate
-
         Gamma = level_scheme.decay_rate
 
-        I = laser.profile(self.x_0, y, self.z_0)
-        
-        I_eff = (2 * level_scheme.degeneracy_factor[laser.target_v]**2 /(level_scheme.degeneracy_factor[laser.target_v] + level_scheme.degeneracy_factor[Level.e])) * level_scheme.isat[laser.target_v]
-        s = I / I_eff
 
-        delta = laser.detuning
-        
-        # https://doi.org/10.48550/arXiv.2510.16203
-        pre_fac = level_scheme.degeneracy_factor[Level.e] / (level_scheme.degeneracy_factor[laser.target_v] + level_scheme.degeneracy_factor[Level.e] )
-        Lambda[laser.target_v.value] = Gamma * pre_fac * s / (1 + s + (2*delta/Gamma)**2)
-        
+        for laser in lasers_list:
+            I = laser.profile(self.x_0, y, self.z_0)
+            
+            I_eff = (2 * level_scheme.degeneracy_factor[laser.target_v]**2 /(level_scheme.degeneracy_factor[laser.target_v] + level_scheme.degeneracy_factor[Level.e])) * level_scheme.isat[laser.target_v]
+            s = I / I_eff
 
+            delta = laser.detuning
+            
+            # https://doi.org/10.48550/arXiv.2510.16203
+            pre_fac = level_scheme.degeneracy_factor[Level.e] / (level_scheme.degeneracy_factor[laser.target_v] + level_scheme.degeneracy_factor[Level.e] )
+            Lambda[laser.target_v.value] = Gamma * pre_fac * s / (1 + s + (2*delta/Gamma)**2)
+        
         M = np.zeros((6,6)) # order: v0,v1,v2,v3,excited, photon_counter
         for i, (level, vb) in enumerate(q.items()):
             M[i, i]   -= Lambda[i]
@@ -44,7 +44,11 @@ class Trajectory:
         M = self.build_rate_matrix(t, level_scheme, laser)
         return M[i, i]
     
-    def build_moment_matrix(self, t, level_scheme, laser):
+    def get_pump_rates(self, t, lasers_list, level_scheme):
+        M = self.build_rate_matrix(t, level_scheme, lasers_list)
+        return M[4, :4]
+    
+    def build_moment_matrix(self, t, level_scheme, lasers_list):
         """
         Let p_i(n, t) = Pr(state(t) = i, N(t) = n)
         dp_i(n,t)/dt = - \sum_k R_{i->k} p_i(n,t) + \sum_{j \in nc} R_{j->i} p_j(n,t) + \sum_{j \in c} R_{j->i} p_j(n-1,t)
@@ -58,7 +62,7 @@ class Trajectory:
 
         Define C = R_{j->i}
         """
-        M = self.build_rate_matrix(t, level_scheme, laser)
+        M = self.build_rate_matrix(t, level_scheme, lasers_list)
         M = M[:5, :5]
         Gamma = level_scheme.decay_rate
         C = np.zeros((5,5))

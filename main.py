@@ -4,7 +4,8 @@ import scipy as scp
 from level_scheme import Level, LevelScheme, Laser
 import level_scheme
 import matplotlib.pyplot as plt
-from photon_statistics import solve_moments, analytic_std, mc_ensemble, pmt
+from photon_statistics import solve_moments, analytic_std, mc_ensemble, pmt, get_max_pump_rates
+import time
 
 """
 Simulation: YbF molecule going through one laser pumping X^2\Sigma(v=0) -> A^2\Pi_{1/2}(v=0) with gaussian profile centred at y = mu and sigma std
@@ -18,15 +19,15 @@ Simulation
 
 """
 
-def rhs(t, N, trajectory, level_scheme, laser):
-    M = trajectory.build_rate_matrix(t, level_scheme, laser)
+def rhs(t, N, trajectory, level_scheme, lasers_list):
+    M = trajectory.build_rate_matrix(t, level_scheme, lasers_list)
     return M @ N
 
 
-def solve_transit(level_scheme, laser, particle, tau):
+def solve_transit(level_scheme, lasers_list, particle, tau):
     sol = scp.integrate.solve_ivp(
         rhs, [0, tau], particle.N0,
-        args=(particle, level_scheme, laser),
+        args=(particle, level_scheme, lasers_list),
         method='Radau',
         rtol=1e-8, atol=1e-14,
         dense_output=True
@@ -51,10 +52,11 @@ def plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, 
     fig, axes = plt.subplots(3, 1, figsize=(8, 12))
  
     ax = axes[0]
-    ax.plot(t * 1e6, mean_analytic, color='tab:blue', label='mean photon count')
+    ax.plot(t * 1e6, mean_analytic, color='tab:blue', label=f'mean photon count ({mean_analytic[-1]:.2f})')
     ax.fill_between(t * 1e6, mean_analytic - std_analytic, mean_analytic + std_analytic, color='tab:blue', alpha=0.25,
-                     label=r'$\pm 1\sigma$ (exact, analytic)')
-    ax.axhline(14.9, color='k', linestyle=':', label='lit. average (14.9)')
+                     label=f'$\pm 1\sigma$ (exact, analytic) ({std_analytic[-1]:.2f})')
+    if n_lasers == 1:
+        ax.axhline(14.9, color='k', linestyle=':', label='lit. average (14.9)')
     ax.set_ylabel("photon count")
     ax.set_xlabel("time (microseconds)")
     ax.set_title("Exact mean $\\pm$ 1 std.dev of photon count (moment-hierarchy ODE)")
@@ -65,9 +67,10 @@ def plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, 
     ax.hist(counts, bins=np.arange(0, max_n) - 0.5, color='tab:green', alpha=0.7,
             label=f'Monte Carlo ({n_molecules} molecules)')
     ax.axvline(mc_avg, color='red', linestyle='--',linewidth=2, label=f'MC Mean ({mc_avg:.2f})')
-    ax.axvline(14.9, color='k', linestyle=':', label='lit. average (14.9)')
+    if n_lasers == 1:
+        ax.axvline(14.9, color='k', linestyle=':', label='lit. average (14.9)')
     ax.axvline(mc_avg - mc_std, color='tab:blue', linestyle='--')
-    ax.axvline(mc_avg + mc_std, color='tab:blue', linestyle='--', label=f'MC $\\pm 1\\sigma ({mc_std:.2f})$')
+    ax.axvline(mc_avg + mc_std, color='tab:blue', linestyle='--', label=f'MC $\\pm 1\\sigma  ({mc_std:.2f})$')
     ax.set_xlabel("total photons emitted per molecule")
     ax.set_ylabel("number of molecules")
     ax.set_title("Full photon-count distribution")
@@ -83,16 +86,16 @@ def plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, 
     ax.legend(loc='upper right')
 
     fig.tight_layout()
+    plt.savefig("Photon_statistics_v1.png", format='png', dpi=300)
+    plt.show()
  
  
-def plot_results(sol, level_scheme, laser, trajectory, tau, dr, n_photons_final):
+def plot_results(sol, level_scheme, lasers_list, trajectory, tau, dr, n_photons_final):
     t_plot = np.linspace(0, tau, 2000)
     N = sol.sol(t_plot)
  
     labels = ["v=0", "v=1", "v=2", "v=3", "excited"]
- 
-    y = trajectory.v_y * t_plot
-    I_profile = laser.profile(trajectory.x_0, y, trajectory.z_0)
+
  
     fig, axes = plt.subplots(5, 1, figsize=(8, 12), sharex=True)
  
@@ -111,20 +114,35 @@ def plot_results(sol, level_scheme, laser, trajectory, tau, dr, n_photons_final)
     ax.set_ylabel("excited-state population", color='tab:red')
     ax.tick_params(axis='y', labelcolor='tab:red')
     ax2 = ax.twinx()
-    ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
+    for laser in lasers_list:
+        y = trajectory.v_y * t_plot
+        I_profile = laser.profile(trajectory.x_0, y, trajectory.z_0)
+        ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
     ax2.set_ylabel(r"laser intensity (unnormalized) / $\text{Wm}^{-2}$", color='gray')
     ax.set_title("Excited-state population vs. laser intensity envelope")
 
     ax = axes[2]
-    ax.plot(t_plot * 1e6, N[5], color='tab:purple', label="photons radiated")
-    ax.set_ylabel("cumulative photon count")
+    for i in range(5):
+        ax.plot(t_plot * 1e6, N[i], label=labels[i], color=colours[i])
+    ax.set_ylabel("Population count")
+    ax2 = ax.twinx()
+    for laser in lasers_list:
+        y = trajectory.v_y * t_plot
+        I_profile = laser.profile(trajectory.x_0, y, trajectory.z_0)
+        ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
+    ax2.set_ylabel(r"laser intensity", color='gray')
     ax.set_title("Radiation profile: Total photons emitted")
+ 
+    ax = axes[3]
+    ax.plot(t_plot*1e6, dr*N[4]*1e-6, color='tab:pink', label="Photon emission")
+    ax.set_ylabel("Photon emission", color='tab:pink')
+    ax.set_title("Radiation profile: Photons emitted per unit time")
+    ax2 = ax.twinx()
+    ax2.plot(t_plot * 1e6, N[5], color='tab:purple', label="photons radiated")
+    ax2.set_ylabel("cumulative photon count", color = 'purple')
     ax.text(0.85, 0.15, f"Total photons: {n_photons_final:.2f}", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, bbox=dict(facecolor='tab:purple', alpha=0.5))
 
-    ax = axes[3]
-    ax.plot(t_plot*1e6, dr*N[4]*1e-6, color='tab:purple', label="Photon emission")
-    ax.set_ylabel("Photon emission")
-    ax.set_title("Radiation profile: photons emitted per unit time")
+
  
     ax = axes[4]
     total = N[:5].sum(axis=0)
@@ -134,10 +152,13 @@ def plot_results(sol, level_scheme, laser, trajectory, tau, dr, n_photons_final)
     ax.set_title("Population conservation check")
  
     fig.tight_layout()
+    plt.savefig("State_evolution_v1.png", format='png', dpi=300)
     plt.show()
 
 
 def main():
+    t1 = time.time()
+
     tau = 20e-5
     vy = 170 # ms^-1
 
@@ -151,39 +172,49 @@ def main():
                         wavelength=YbF_wavelength(), 
                         degeneracy_factor = {Level.g: 12, Level.v1: 12, Level.v2: 12, Level.v3: 12, Level.e: 4})
 
-    YbF.print_isat()
-    laser = Laser(target_v = Level.g, detuning = 0, wavelength=552e-9, mu =mu, sigma=sigma, I0 = I0) # P(1), I0 in Wm^-2
+    P1 = Laser(target_v = Level.g, detuning = 0, wavelength=552e-9, mu =mu, sigma=sigma, I0 = I0) # P(1), I0 in Wm^-2
+    V1 = Laser(target_v= Level.v1, detuning=0, wavelength=568e-9, mu=mu, sigma=sigma, I0=I0 )
+    lasers_list = [P1, V1]
 
-    p1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0, N0 = [1.0,0.0,0.0,0.0,0.0,0.0])
-    sol = solve_transit(YbF, laser, p1, tau)
+    global n_lasers
+    n_lasers = len(lasers_list)
+
+    particle_1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0, N0 = [1.0,0.0,0.0,0.0,0.0,0.0])
+    sol = solve_transit(YbF, lasers_list, particle_1, tau)
     print(sol.message, " n_eval:", sol.t.size)
     
-    M_mid = p1.build_rate_matrix(tau / 2, YbF, laser)
-    col_sums = M_mid[:5, :5].sum(axis=0) # exclude photon_count row, one-way accumulator
-    print("Column sums of M at t=tau/2 (should be ~0):", col_sums)
+    for laser in lasers_list:
+        M_mid = particle_1.build_rate_matrix(tau / 2, YbF, [laser])
+        col_sums = M_mid[:5, :5].sum(axis=0) # exclude photon_count row, one-way accumulator
+        print("Column sums of M at t=tau/2 (should be ~0):", col_sums)
+
+
+    get_max_pump_rates(YbF, lasers_list, particle_1, tau)
 
 
     n_photons_final = sol.y[5, -1]
     print(f"Photons radiated over transit: {n_photons_final:.3f}")
 
-    plot_results(sol, YbF, laser, p1, tau, dr, n_photons_final)
+    plot_results(sol, YbF, lasers_list, particle_1, tau, dr, n_photons_final)
 
     # Moments
-    sol_moments = solve_moments(YbF, laser, p1, tau)
+    sol_moments = solve_moments(YbF, lasers_list, particle_1, tau)
     t = np.linspace(0, tau, 8000)
     mean_analytic, std_analytic = analytic_std(sol_moments, t)
 
     # MC
-    p2 = Trajectory(v_y = vy, x_0=0, z_0=0, N0=None)
+    particle_2 = Trajectory(v_y = vy, x_0=0, z_0=0, N0=None)
     
-    n_molecules = 8000
-    all_photon_times, counts = mc_ensemble(YbF, laser, p2, tau, n_molecules)
+    n_molecules = 4000
+    all_photon_times, counts = mc_ensemble(YbF, lasers_list, particle_2, tau, n_molecules)
     print(f"MC ({n_molecules} molecules): mean={counts.mean():.3f}, std={counts.std():.3f}")
 
     epsilon = 0.2 # Efficiency * solid_angle / 2\pi # FIND ACTUAL VALUE
     bins, pmt_counts = pmt(all_photon_times, tau, epsilon)
 
     plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, counts.mean(), counts.std(), all_photon_times, bins, pmt_counts)
+
+    print("--- seconds ---", time.time() - t1)
 
 
 
