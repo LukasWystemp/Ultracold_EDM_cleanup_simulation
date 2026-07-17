@@ -2,6 +2,7 @@ import numpy as np
 import scipy as scp
 from level_scheme import Level
 import time
+from trajectory import Trajectory
 
 def rhs_moments(t, psi, particle, level_scheme, lasers_list):
     V = particle.build_moment_matrix(t, level_scheme, lasers_list)
@@ -94,6 +95,7 @@ def mc_ensemble(level_scheme, lasers_list, trajectory, tau, n_molecules):
     all_photon_times = []
     counts = np.zeros(n_molecules)
     max_rate = get_max_pump_rates(level_scheme, lasers_list, trajectory, tau)
+    print(max_rate)
     for i in range(n_molecules):
         pts = simulate_mc(level_scheme, lasers_list, trajectory, tau, rng, max_rate)
         all_photon_times.append(pts)
@@ -113,7 +115,25 @@ def pmt(all_photon_times, tau, epsilon=1.0):
             pts = pts[np.random.uniform(size=len(pts)) < epsilon]
         counts += np.histogram(pts, bins=bins)[0]
     return bins, counts
+s
+
+def ccd(all_photon_times, tau, v_y, pixel_size, epsilon=1.0):
+    rng = np.random.default_rng()
+    y_max = v_y * tau
+    bins = np.arange(0, y_max + pixel_size, pixel_size)
+    counts = np.zeros(len(bins) - 1)
+    for pts in all_photon_times:
+        y = v_y * np.array(pts)
+        if epsilon < 1.0:
+            y = np.array(y)
+            y = y[rng.uniform(size=len(y)) < epsilon]
+        counts += np.histogram(y, bins=bins)[0]
+    return bins, counts
 
 
+def mc_ensemble_2d(level_scheme, lasers_list, trajectory, tau, n_molecules):
+    rng = np.random.default_rnd()
 
+    all_photon_times = []
+    counts = np.zeros(n_molecules)
 

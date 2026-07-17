@@ -4,7 +4,7 @@ import scipy as scp
 from level_scheme import Level, LevelScheme, Laser
 import level_scheme
 import matplotlib.pyplot as plt
-from photon_statistics import solve_moments, analytic_std, mc_ensemble, pmt, get_max_pump_rates
+from photon_statistics import *
 import time
 
 """
@@ -12,6 +12,8 @@ Simulation: YbF molecule going through one laser pumping X^2\Sigma(v=0) -> A^2\P
 
 To-Do
 Find PMT efficiency and solid angle
+
+GAmma = 1.5 GHz
 
 Simulation
 - Time resolution? 
@@ -48,7 +50,7 @@ def YbF_wavelength():
     return {Level.g: 552e-9, Level.v1: 568e-9, Level.v2: 585e-9, Level.v3: 602e-9}
 
 
-def plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, mc_avg, mc_std, all_photon_times, pmt_bins, pmt_counts):
+def plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, mc_avg, mc_std, all_photon_times, cam_y, cam_counts):
     fig, axes = plt.subplots(3, 1, figsize=(8, 12))
  
     ax = axes[0]
@@ -77,12 +79,11 @@ def plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, 
     ax.legend()
 
     ax = axes[2]
-    pmt_t = 0.5 * (pmt_bins[:-1] + pmt_bins[1:])
-    ax.errorbar(pmt_t * 1e6, pmt_counts, yerr=np.sqrt(pmt_counts), fmt='.', color='tab:purple',
+    ax.errorbar(cam_y, cam_counts, yerr=np.sqrt(cam_counts), fmt='.', color='tab:purple',
                  alpha=0.6, label=f'ensemble PMT counts/bin')
     ax.set_ylabel("detected counts / bin\n(ensemble)")
-    ax.set_xlabel("time (microseconds)")
-    ax.set_title("Synthetic PMT: Ensemble rate with shot noise")
+    ax.set_xlabel("y (m)")
+    ax.set_title("Synthetic CCD: Ensemble rate with shot noise")
     ax.legend(loc='upper right')
 
     fig.tight_layout()
@@ -96,7 +97,6 @@ def plot_results(sol, level_scheme, lasers_list, trajectory, tau, dr, n_photons_
  
     labels = ["v=0", "v=1", "v=2", "v=3", "excited"]
 
- 
     fig, axes = plt.subplots(5, 1, figsize=(8, 12), sharex=True)
  
     ax = axes[0]
@@ -120,6 +120,12 @@ def plot_results(sol, level_scheme, lasers_list, trajectory, tau, dr, n_photons_
         ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
     ax2.set_ylabel(r"laser intensity (unnormalized) / $\text{Wm}^{-2}$", color='gray')
     ax.set_title("Excited-state population vs. laser intensity envelope")
+    if len(lasers_list) == 2:
+        ax.text(0.85, 0.85, f"P1 Power: {lasers_list[0].power:.4f} W \n V1 Power: {lasers_list[1].power:.4f} mW", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, bbox=dict(facecolor='gray', alpha=0.5))
+    elif len(lasers_list) == 1:
+        ax.text(0.85, 0.85, f"P1 Power: {lasers_list[0].power:.4f} W", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, bbox=dict(facecolor='gray', alpha=0.5))
+
+
 
     ax = axes[2]
     for i in range(5):
@@ -131,7 +137,7 @@ def plot_results(sol, level_scheme, lasers_list, trajectory, tau, dr, n_photons_
         I_profile = laser.profile(trajectory.x_0, y, trajectory.z_0)
         ax2.plot(t_plot * 1e6, I_profile, color='gray', linestyle='--', alpha=0.6, label="laser intensity")
     ax2.set_ylabel(r"laser intensity", color='gray')
-    ax.set_title("Radiation profile: Total photons emitted")
+    ax.set_title("Population vs laser intensity envelope")
  
     ax = axes[3]
     ax.plot(t_plot*1e6, dr*N[4]*1e-6, color='tab:pink', label="Photon emission")
@@ -141,8 +147,6 @@ def plot_results(sol, level_scheme, lasers_list, trajectory, tau, dr, n_photons_
     ax2.plot(t_plot * 1e6, N[5], color='tab:purple', label="photons radiated")
     ax2.set_ylabel("cumulative photon count", color = 'purple')
     ax.text(0.85, 0.15, f"Total photons: {n_photons_final:.2f}", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, bbox=dict(facecolor='tab:purple', alpha=0.5))
-
-
  
     ax = axes[4]
     total = N[:5].sum(axis=0)
@@ -156,15 +160,15 @@ def plot_results(sol, level_scheme, lasers_list, trajectory, tau, dr, n_photons_
     plt.show()
 
 
-def main():
+def run(power_p1, power_v1):
     t1 = time.time()
 
     tau = 20e-5
-    vy = 170 # ms^-1
+    vy = 100 # ms^-1
 
     mu = 0.5 * vy * tau # centre
     sigma = 0.00245 # m
-    I0 = 210 # Wm^-2
+    #I0 = 210 # Wm^-2
 
     dr = 1/(28e-9)  # https://doi.org/10.1039/c1cp21585j # decay rate for e state
     YbF = LevelScheme(decay_rate = dr, 
@@ -172,14 +176,14 @@ def main():
                         wavelength=YbF_wavelength(), 
                         degeneracy_factor = {Level.g: 12, Level.v1: 12, Level.v2: 12, Level.v3: 12, Level.e: 4})
 
-    P1 = Laser(target_v = Level.g, detuning = 0, wavelength=552e-9, mu =mu, sigma=sigma, I0 = I0) # P(1), I0 in Wm^-2
-    V1 = Laser(target_v= Level.v1, detuning=0, wavelength=568e-9, mu=mu, sigma=sigma, I0=I0 )
+    P1 = Laser(target_v = Level.g, detuning = 0, wavelength=552e-9, mu =mu, sigma=sigma, power=power_p1) # P(1), I0 in Wm^-2
+    V1 = Laser(target_v= Level.v1, detuning=0, wavelength=568e-9, mu=mu, sigma=sigma, power=power_v1)
     lasers_list = [P1, V1]
 
     global n_lasers
     n_lasers = len(lasers_list)
 
-    particle_1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0, N0 = [1.0,0.0,0.0,0.0,0.0,0.0])
+    particle_1 = Trajectory(v_y = vy, x_0 = 0, z_0 = 0.002, N0 = [1.0,0.0,0.0,0.0,0.0,0.0])
     sol = solve_transit(YbF, lasers_list, particle_1, tau)
     print(sol.message, " n_eval:", sol.t.size)
     
@@ -203,19 +207,40 @@ def main():
     mean_analytic, std_analytic = analytic_std(sol_moments, t)
 
     # MC
-    particle_2 = Trajectory(v_y = vy, x_0=0, z_0=0, N0=None)
     
-    n_molecules = 4000
-    all_photon_times, counts = mc_ensemble(YbF, lasers_list, particle_2, tau, n_molecules)
+    n_molecules = 8000
+    all_photon_times, counts = mc_ensemble(YbF, lasers_list, particle_1, tau, n_molecules)
     print(f"MC ({n_molecules} molecules): mean={counts.mean():.3f}, std={counts.std():.3f}")
 
     epsilon = 0.2 # Efficiency * solid_angle / 2\pi # FIND ACTUAL VALUE
-    bins, pmt_counts = pmt(all_photon_times, tau, epsilon)
+    pmt_bins, pmt_counts = pmt(all_photon_times, tau, epsilon)
 
-    plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, counts.mean(), counts.std(), all_photon_times, bins, pmt_counts)
 
     print("--- seconds ---", time.time() - t1)
 
+    bin_width = 5e-6
+    pixel_size = vy * bin_width  # match same effective time resolution
+    cam_bins, cam_counts = ccd(all_photon_times, tau, vy, pixel_size, epsilon=0.5)
+    cam_y = 0.5 * (cam_bins[:-1] + cam_bins[1:])
+
+    plot_photon_statistics(t, mean_analytic, std_analytic, n_molecules, counts, counts.mean(), counts.std(), all_photon_times, cam_y, cam_counts)
+
+    #pmt_t = 0.5 * (pmt_bins[:-1] + pmt_bins[1:])
+    return cam_y, cam_counts
+
+
+def main():
+    power_p1 = 105e-3 # 18e-3 # W
+    power_v1 = 38e-3#32.3e-3
+    pmt_t_1, pmt_counts_1 = run(power_p1, power_v1)
+    pmt_t_2, pmt_counts_2 = run(power_p1, 0)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+ 
+    ax.errorbar(pmt_t_1 * 1e6, pmt_counts_1, yerr=np.sqrt(pmt_counts_1), fmt='.', color='tab:purple')
+    ax.errorbar(pmt_t_2 * 1e6, pmt_counts_2, yerr=np.sqrt(pmt_counts_2), fmt='.', color='tab:red')
+    ax.set_ylabel("photon count")
+    ax.set_xlabel("time (ms)")
 
 
 

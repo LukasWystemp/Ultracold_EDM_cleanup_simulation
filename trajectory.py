@@ -28,6 +28,7 @@ class Trajectory:
             # https://doi.org/10.48550/arXiv.2510.16203
             pre_fac = level_scheme.degeneracy_factor[Level.e] / (level_scheme.degeneracy_factor[laser.target_v] + level_scheme.degeneracy_factor[Level.e] )
             Lambda[laser.target_v.value] = Gamma * pre_fac * s / (1 + s + (2*delta/Gamma)**2)
+    
         
         M = np.zeros((6,6)) # order: v0,v1,v2,v3,excited, photon_counter
         for i, (level, vb) in enumerate(q.items()):

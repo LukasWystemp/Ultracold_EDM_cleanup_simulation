@@ -62,10 +62,13 @@ class Laser:
 
     mu: float
     sigma: float
-    I0: float
+    power: float
+    I0: float = field(init=False, repr=False)
     profile: callable = field(init=False, repr=False)
 
     def __post_init__(self):
+        self.I0 = self.power / (2 * np.pi * self.sigma**2)
+
         def tophat(x, y, z):
             # propagating along x
             y = np.asarray(y)
