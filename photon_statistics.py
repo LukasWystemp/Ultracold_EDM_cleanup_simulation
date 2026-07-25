@@ -115,7 +115,7 @@ def pmt(all_photon_times, tau, epsilon=1.0):
             pts = pts[np.random.uniform(size=len(pts)) < epsilon]
         counts += np.histogram(pts, bins=bins)[0]
     return bins, counts
-s
+
 
 def ccd(all_photon_times, tau, v_y, pixel_size, epsilon=1.0):
     rng = np.random.default_rng()
