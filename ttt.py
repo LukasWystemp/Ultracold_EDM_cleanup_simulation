@@ -29,7 +29,11 @@ Notes
   random transverse position x0. 
 - Finite laser linewidth is included as phase diffusion, common to all
   sidebands of one colour; this partially destabilises coherent dark states. 
-- Polarisation: lin y -> s+ -> lin z -> s-
+- Polarisation: The light is linearly polarised and an EOM switches it between two
+  orthogonal linear polarisations (y-hat and z-hat, both
+  perpendicular to k // x) with a square wave at f_EOM. This is
+  implemented by giving every physical beam two static-polarisation
+  pyLCP beams and gating them on/off in the MCWF _rhs. 
 """
 
 import numpy as np
@@ -40,7 +44,6 @@ from pylcp.common import cart2spherical
 from numba import njit
 import matplotlib.pyplot as plt
 import time
-from pylcp.hamiltonians import wigner_3j as _w3j, wigner_6j as _w6j
 
 t_begin = time.time()
 
@@ -48,7 +51,7 @@ trapz = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
 
 RUN_RATEEQ = True          # deterministic rate-eq reference (upper bound)
 RUN_VALIDATION = True      # MCWF vs pylcp.obe cross-check (reduced system)
-N_MC = 200                 # molecules in the MCWF ensemble
+N_MC = 100                 # molecules in the MCWF ensemble
 DT = 0.004                 # RK4 step (units of 1/Gamma); halve to test convergence
 SEED = 7
 
@@ -59,7 +62,7 @@ gamma_MHz = 1/(2*np.pi*tau)/1e6
 Gamma = 1/tau
 print(f"energy unit: Gamma/2pi = {gamma_MHz:.3f} MHz")
 
-time_bin = 22.32e-3 # s
+time_bin = 31.56e-3 # s
 
 w_p1 = 552e-9
 w_v1 = 568e-9
@@ -80,8 +83,8 @@ assert abs(fcf_sum - 1.) < 1e-15, f"FCF factors {fcf_sum} don't sum to 1"
 mass = 193*cts.value('atomic mass constant')/(cts.hbar*k_p1**2*tau)
 
 z_laser = 10*mm
-w_beam = 2.45*mm            # Gaussian std of the intensity profile
-sigma_m = 2.45e-3
+w_beam = 2.5*mm            # Gaussian std of the intensity profile
+sigma_m = 2.5e-3
 
 T_t = 1.8 # transverse temperature
 m_YbF = (173.9388664 + 18.9984032)*cts.value('atomic mass constant') # kg
@@ -103,6 +106,7 @@ def power_to_s(P_total, fracs, sigma_m, lam):
     fracs = fracs/fracs.sum()
     return (P_total*fracs)/(2*np.pi*sigma_m**2)/I_sat
 
+
 V1_ON = True
 
 frac_p1 = np.array([1, 1, 1])
@@ -110,7 +114,7 @@ shifts_p1_MHz = np.array([0., 159., 192.])
 frac_v1 = np.array([50, 16.7, 16.7, 16.6])
 
 P_p1 = 105e-3
-P_v1 = 44e-3 if V1_ON else 0
+P_v1 = 30e-3 if V1_ON else 0
 s_p1 = power_to_s(P_p1, frac_p1, sigma_m, w_p1)
 s_v1 = power_to_s(P_v1, frac_v1, sigma_m, w_v1)
 print("peak s per sideband: main", np.array2string(s_p1, precision=1),
@@ -128,9 +132,11 @@ gL_v1 = np.pi*linewidth_v1_Hz*tau
 # y-hat and z-hat (both perp. to k // x) with a 50% duty-cycle square
 # wave at f_EOM. Set to the experimental switching frequency.
 f_EOM = 900000                           # Hz
-T_switch = 1./(f_EOM*tau)              # full period in units of 1/Gamma
-om_pol = 2.*np.pi/T_switch
-POL_DBETA = 0.0
+T_switch = 1./(f_EOM*tau)              # full pol cycle in units of 1/Gamma
+om_pol = 2.*np.pi/T_switch             # angular rate of the retarder phase
+POL_DBETA = 0.0                        # rad; 0 = perfect cycle. Nonzero
+# makes the circular points elliptical (amplitude axis ratio
+# tan(pi/4+dbeta)) and tilts the linear points by dbeta.
 cosb_pol = np.cos(np.pi/4. + POL_DBETA)
 sinb_pol = np.sin(np.pi/4. + POL_DBETA)
 print(f"EOM pol cycle (y -> sigma -> z -> sigma'): {f_EOM/1e6:.2f} MHz "
@@ -175,27 +181,6 @@ d_blk = {v: np.sqrt(fcf[v])*dijq[v] for v in range(4)}   # (3, 12, 4) each,
 # maps 4 excited A amplitudes down into the 12 sublevels of ground manifold v, 
 # for emitted polarization q.
 
-# -----------------------------------------------------------
-# Microwaves
-MW_ON = True
-MW_PRE_EVOLVE = True
-
-pol_mw = np.array([0., 1., 1.])/np.sqrt(2.)
-det_mw_kHz = 0.0
-Omega_mw_kHZ = 100.
-
-H0_N0, Bq_N0, U_N0, N0basis = pylcp.hamiltonians.XFmolecules.Xstate(
-    N=0, I=1/2, B=7233.8271, gamma=-13.41679,
-    b=(170.26374-85.4208/3), 
-    c=85.4208, CI=0.02038, q0=0, q2=0,
-    gS=2.0023193043622, gI=0.,
-    muB=cts.value('Bohr magneton in Hz/T')/1e6*1e-4, return_basis=True
-    )
-n_N0 = H0_N0.shape[0]
-
-
-
-
 def build_ham(v_list):
     """pyLCP hamiltonian containing the X(v) manifolds in v_list + A."""
     hm = pylcp.hamiltonian(mass=mass)
@@ -221,9 +206,10 @@ def crossed_beam_s(s_max, wb, zc):
 # The two orthogonal linear polarisations the EOM switches between.
 # Beams propagate along +/-x, so both y-hat and z-hat are transverse.
 # z-hat drives pi transitions, y-hat drives (sigma+ + sigma-)/sqrt(2).
-# Rotate axes e1,2 = 1/\sqrt{2}(\hat{y} +- \hat{z})
-# E = cos(b) e1 + sin(b) e2 e^{i \phi(t)}, b = \pi / 4
-POL_EOM = (np.array([0., 1., 1.])/np.sqrt(2.), 
+# Pol groups 0/1 are the retarder axes e1,2 = (y_hat +/- z_hat)/sqrt(2);
+# the smooth cycle E(t) = cosb*E1 + e^{i phi(t)} sinb*E2 is applied in
+# _rhs. (Both perpendicular to k // x.)
+POL_EOM = (np.array([0., 1., 1.])/np.sqrt(2.),
            np.array([0., 1., -1.])/np.sqrt(2.))
 
 def beam_pair(k, s_arr, deltas, s_scale=1.0):
@@ -259,6 +245,22 @@ def hf_levels(H0):
 
 E_X0_hf, cnt_X0 = hf_levels(H0_X[0])
 E_X1_hf, cnt_X1 = hf_levels(H0_X[1])
+
+# ---- microwaves: N=0,F=1 <-> N=1,F=2 (incoherent, slow) ---------------
+# Molecules enter 50/50: half in N=1,F=2 (cycling starts immediately),
+# half in the laser-dark N=0,F=1 reservoir, transferred into N=1,F=2 by
+# the microwaves at a slow incoherent rate R_mw << scattering rate.
+# Back-transfer F=2 -> N=0 is neglected (fold into the choice of R_mw).
+f_res = 0.5                  # fraction arriving in the N=0,F=1 reservoir
+R_mw = 1.0e4                 # s^-1  SET to the measured transfer rate
+# sublevel indices of X(v=0) N=1, F=2 (the degeneracy-5 level): initial
+# state of bright molecules and destination of the microwave transfer
+E_F2_MHz = float(E_X0_hf[np.where(cnt_X0 == 5)[0][0]]*gamma_MHz)
+idx_F2_X0 = np.where(np.isclose(np.diag(H0_X[0]).real, E_F2_MHz,
+                                atol=1e-3))[0]
+assert len(idx_F2_X0) == 5, "X0 F=2 manifold not found"
+print(f"microwaves: f_res = {f_res}, R_mw = {R_mw:.1e} /s; "
+      f"F=2 sublevel indices {idx_F2_X0}")
 E_A_F1 = np.max(np.diag(H0_A))/gamma_MHz
 
 # P1: carrier resonant with F=1^- plus sidebands at the fixed lab RF
@@ -301,11 +303,13 @@ print("V1/X1 sideband map (one per level, resonant):")
 for i, (Ei, ci) in enumerate(zip(E_X1_hf, cnt_X1)):
     print(f"  [{i}] {F_of_count[ci]:4s} E={Ei*gamma_MHz:8.1f} MHz "
           f"frac={frac_v1[i]/np.sum(frac_v1):.3f}  s={s_v1[i]:.1f}")
-
  
+
+
 B_vec = np.array([0.08, -0.13, 0.1]) # in Gauss
 magField = pylcp.constantMagneticField(B_vec)
 Bq_sph = cart2spherical(B_vec)
+
 
 # -----------------------------------------------------------------------
 # Velocity distribution
@@ -322,10 +326,10 @@ print(f"transverse MB: sigma_vx = {sigma_vx:.2f} m/s -> Doppler sigma "
       f"= {sigma_vx/w_p1/1e6/gamma_MHz:.2f} Gamma")
 
 
-R_s = L_flight - D_ap # m, source ap to det ap
+R_s = L_flight - d_ap # m, source ap to det ap
 v_f_SI = L_flight/time_bin
 R_ap_SI = R_ap*x0_u # m
-assert r_source < R_ap_SI, "Source aperture radius exceeds detector aperture radius"
+assert r_source < R_s, "Source aperture radius exceeds detector aperture radius"
 r_max_SI = R_ap_SI + (R_ap_SI + r_source)*d_ap/R_s
 v_perp_max = (R_ap_SI + r_source)*v_f_SI/R_s
 print(f"Geometry: R_s = {R_s} m, d = {d_ap} m, R_ap = {R_ap_SI} m, r_s = {r_source} m")
@@ -435,16 +439,21 @@ H_eff_static[iA:iA+n_A, iA:iA+n_A] += -0.5j*tot
 
 
 @njit(cache=True)
-def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
-         phL, env, out):
+def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0,
+         cosb, sinb, phL, env, out):
     """out = -i H_eff(t) psi, with per-colour laser phases phL[0:2].
 
-    Smooth EOM Switching: E(t) = cosb*E1 + e^{i \phi(t)}*sinb*E2, with
-    E1, E2 the two beams polarised along e1,2 = 1/\sqrt{2}(\hat{y} + \hat{z})
-    (pol gropus 0 and 1)
-    \phi(t) = om_pol*t + ph0
-    b = \pi/4 for the perfect cycle
-    """
+    Smooth EOM polarisation cycle: the physical field per (sideband,
+    direction) is  E(t) = cosb*E1 + exp(i phi(t))*sinb*E2  with E1, E2
+    the two beams polarised along e1,2 = (y_hat +/- z_hat)/sqrt(2)
+    (pol groups 0 and 1) and phi(t) = om_pol*t + ph0. phi = 0, pi/2,
+    pi, 3pi/2 gives linear-y, sigma, linear-z, sigma' -- the retarder
+    cycle. cosb = cos(pi/4 + dbeta), sinb = sin(pi/4 + dbeta): dbeta=0
+    is the perfect cycle; dbeta != 0 makes the circular points
+    elliptical ('oval') and tilts the linear points by dbeta.
+    Total intensity is constant through the cycle (e1 . e2 = 0).
+    om_pol <= 0 disables modulation (both beams on at full amplitude,
+    matching the static pylcp beams -- used by the OBE cross-check)."""
     n = psi.shape[0]
     # H_static \psi
     for i in range(n):
@@ -455,9 +464,6 @@ def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
     nb = Mb.shape[0]
     nA0 = Hs.shape[0] - 4
     for b in range(nb):
-        #if T_half > 0.:
-        #    if (np.int64((t + tsw0)//T_half) % 2) != polgrp[b]:
-        #        continue
         # c_b(t) = env exp(i(\delta t + \phi_{colour}))
         c = env*np.exp(1j*(dels[b]*t + phL[colour[b]]))
         if om_pol > 0.:
@@ -484,10 +490,16 @@ def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
 
 
 @njit(cache=True)
-def mcwf_trajectory(psi0, Hs, Mb, rows, dels, colour, polgrp, om_pol, cosb, sinb,
-                    Lops, Lv, vfw, zc, y0, vy, sig, gL, dt, T, t_start, seed,
-                    tgrid, pops, jhist):
+def mcwf_trajectory(psi0, Hs, Mb, rows, dels, colour, polgrp, om_pol,
+                    cosb, sinb, Lops, Lv, vfw, zc, y0, vy, sig, gL,
+                    dt, T, t_start, seed, tgrid, pops, jhist):
     """One quantum trajectory. Returns (n_photons, final_v, t_dark).
+
+    t_start > 0: the molecule sits in the dark N=0,F=1 reservoir until
+    the microwaves transfer it at t_start (its position advances during
+    the wait, so it enters the light at z = vfw*t_start). pops before
+    t_start are left unrecorded (the reservoir is outside the 52-state
+    space).
 
     Additionally ACCUMULATES (+=, over the whole ensemble) into:
       pops[ig, 0:4] -- population in X(v=0..3) at tgrid[ig]
@@ -503,35 +515,34 @@ def mcwf_trajectory(psi0, Hs, Mb, rows, dels, colour, polgrp, om_pol, cosb, sinb
     k3 = np.empty(n, np.complex128); k4 = np.empty(n, np.complex128)
     tmp = np.empty(n, np.complex128)
     phL = np.zeros(2)
-    # molecules arrive at a random phase of the EOM switching cycle
+    # molecules arrive at a random phase of the retarder cycle
     ph0 = 0.
     if om_pol > 0.:
         ph0 = np.random.random()*2.*np.pi
-    
     t = t_start
     ig = 0
     while ig < tgrid.shape[0] and t_start > tgrid[ig]:
-        ig += 1 # skip grid points in N=0
+        ig += 1                         # skip grid points in the dark wait
     rjump = np.random.random()
     nph = 0
     while t < T:
         z = vfw*t - zc
         y = y0 + vy*t
         env = np.exp(-0.25*(z*z + y*y)/(sig*sig))
-        _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
-             phL, env, k1)
+        _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0,
+             cosb, sinb, phL, env, k1)
         for i in range(n):
             tmp[i] = psi[i] + 0.5*dt*k1[i]
-        _rhs(t+0.5*dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
-             phL, env, k2)
+        _rhs(t+0.5*dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_pol,
+             ph0, cosb, sinb, phL, env, k2)
         for i in range(n):
             tmp[i] = psi[i] + 0.5*dt*k2[i]
-        _rhs(t+0.5*dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
-             phL, env, k3)
+        _rhs(t+0.5*dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_pol,
+             ph0, cosb, sinb, phL, env, k3)
         for i in range(n):
             tmp[i] = psi[i] + dt*k3[i]
-        _rhs(t+dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
-             phL, env, k4)
+        _rhs(t+dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_pol,
+             ph0, cosb, sinb, phL, env, k4)
         for i in range(n):
             psi[i] += dt/6.*(k1[i] + 2.*k2[i] + 2.*k3[i] + k4[i])
         t += dt
@@ -684,16 +695,17 @@ if RUN_VALIDATION:
     rows_r = np.array(rows_r, dtype=np.int64)
     dels_r = np.array(dels_r, dtype=np.float64)
     col_r = np.zeros(len(Ms_r), dtype=np.int64)
-    # pylcp.obe cannot gate polarisations in time, so the cross-check is
-    # run with switching DISABLED (T_half = -1): both linear pols on
-    # simultaneously in both MCWF and OBE. This still validates every
+    # pylcp.obe cannot modulate polarisations in time, so the
+    # cross-check runs with modulation DISABLED (om_pol = -1): both
+    # e1/e2 beams on statically at full amplitude in both MCWF and OBE
+    # (total field sqrt(2)*y_hat). This still validates every
     # field/phase/Zeeman/jump convention, which is pol-independent.
     pol_r = polgrp_for(len(deltas_p1))
     Lv_red = np.zeros(3, dtype=np.int64)
 
     # store P_A(t) per trajectory on a grid: rerun trajectory in chunks
     @njit(cache=True)
-    def traj_PA(psi0, Hs, Mb, rows, dels, colour, polgrp, T_half,
+    def traj_PA(psi0, Hs, Mb, rows, dels, colour, polgrp, om_p,
                 Lops, Lv, dt, tgrid, seed):
         np.random.seed(seed)
         n = psi0.shape[0]
@@ -708,20 +720,20 @@ if RUN_VALIDATION:
         ig = 0
         rjump = np.random.random()
         while ig < tgrid.shape[0]:
-            _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, -1, 0., 1., 1.,
-                 phL, 1.0, k1)
+            _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_p, 0.,
+                 1., 1., phL, 1.0, k1)
             for i in range(n):
                 tmp[i] = psi[i] + 0.5*dt*k1[i]
             _rhs(t+0.5*dt, tmp, Hs, Mb, rows, dels, colour, polgrp,
-                 -1, 0., 1., 1., phL, 1.0, k2)
+                 om_p, 0., 1., 1., phL, 1.0, k2)
             for i in range(n):
                 tmp[i] = psi[i] + 0.5*dt*k2[i]
             _rhs(t+0.5*dt, tmp, Hs, Mb, rows, dels, colour, polgrp,
-                 -1, 0., 1., 1., phL, 1.0, k3)
+                 om_p, 0., 1., 1., phL, 1.0, k3)
             for i in range(n):
                 tmp[i] = psi[i] + dt*k3[i]
-            _rhs(t+dt, tmp, Hs, Mb, rows, dels, colour, polgrp, 
-                 -1, 0., 1., 1., phL, 1.0, k4)
+            _rhs(t+dt, tmp, Hs, Mb, rows, dels, colour, polgrp, om_p,
+                 0., 1., 1., phL, 1.0, k4)
             for i in range(n):
                 psi[i] += dt/6.*(k1[i] + 2.*k2[i] + 2.*k3[i] + k4[i])
             t += dt
@@ -797,7 +809,7 @@ if RUN_VALIDATION:
 print(f"\n--- MCWF ensemble: {N_MC} molecules through the beams ---")
 rng = np.random.default_rng(SEED)
 # 16 main + 16 repump beams (4 sidebands x 2 directions x 2 EOM pols)
-colour_arr = np.array([0]*4*len(deltas_p1) + [1]*4*len(deltas_v1), dtype=np.int64)
+colour_arr = np.array([0]*12 + [1]*16, dtype=np.int64) # check if correct now
 if V1_ON:
     polgrp_arr = np.concatenate([polgrp_for(len(deltas_p1)),
                                 polgrp_for(len(deltas_v1))])
@@ -826,18 +838,31 @@ for m in range(N_MC):
     vx = vx_SI/v_unit; vy = vy_SI / v_unit
     # y0 = 0 for block, y(t) applied inside mcfw
     Mb, rows, dels, kxs = extract_beam_blocks(x0, 0.)
-    i0 = int(rng.integers(n_X))
+    dels_m = dels - kxs*vx
+    # ---- microwave-prepared initial condition -------------------------
+    # Half the molecules arrive cycling-ready in N=1,F=2 (uniform over
+    # its 5 sublevels); the other half sit in the dark N=0,F=1 reservoir
+    # until the slow incoherent microwaves transfer them into N=1,F=2
+    # after an exponential wait (rate R_mw). A molecule transferred
+    # after the transit contributes zero photons. All rng draws happen
+    # unconditionally, and t_start depends only on shared draws, so V1
+    # on/off runs with the same SEED keep identical geometry.
+    u_res = rng.random()
+    t_wait = rng.exponential(1./R_mw)/tau        # seconds -> 1/Gamma
+    i0 = int(idx_F2_X0[int(rng.integers(len(idx_F2_X0)))])
+    seed_traj = int(rng.integers(2**31))
+    t_start = t_wait if u_res < f_res else 0.
+    if t_start >= t_max:
+        photons[m], v_final[m] = 0, -1           # never left the reservoir
+        continue
     psi0 = np.zeros(n_states, complex)
     psi0[i0] = 1.
-
-    dels_m = dels - kxs*vx
     nph, vf, _ = mcwf_trajectory(psi0, H_eff_static, Mb, rows, dels_m,
-                                 colour_arr, polgrp_arr, om_pol, 
+                                 colour_arr, polgrp_arr, om_pol,
                                  cosb_pol, sinb_pol, L_ops, L_v,
                                  v_forward, z_laser, y0, vy, w_beam, gL,
-                                 DT, t_max, 0., int(rng.integers(2**31)),
+                                 DT, t_max, t_start, seed_traj,
                                  tgrid_pop, pop_acc, jump_hist)
-
     photons[m], v_final[m] = nph, vf
     if (m+1) % 10 == 0:
         print(f"  {m+1}/{N_MC}: running mean = {photons[:m+1].mean():.1f}")
@@ -849,6 +874,8 @@ print(f"mean photons/molecule: {photons.mean():.1f} "
       f"+/- {photons.std()/np.sqrt(N_MC):.1f}")
 print(f"std / median / max:    {photons.std():.1f} / "
       f"{np.median(photons):.0f} / {photons.max()}")
+print(f"never transferred from N=0 reservoir: "
+      f"{np.mean(v_final == -1):.2f} of ensemble")
 if n_photons_re is not None:
     print(f"(rate equations gave {n_photons_re:.1f} -- "
           f"coherent dark states reduce this by "
