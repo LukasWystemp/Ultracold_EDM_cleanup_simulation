@@ -59,7 +59,7 @@ gamma_MHz = 1/(2*np.pi*tau)/1e6
 Gamma = 1/tau
 print(f"energy unit: Gamma/2pi = {gamma_MHz:.3f} MHz")
 
-time_bin = 22.32e-3 # s
+time_bin = 31.56e-3 # s
 
 w_p1 = 552e-9
 w_v1 = 568e-9
@@ -103,7 +103,7 @@ def power_to_s(P_total, fracs, sigma_m, lam):
     fracs = fracs/fracs.sum()
     return (P_total*fracs)/(2*np.pi*sigma_m**2)/I_sat
 
-V1_ON = True
+V1_ON = False
 
 frac_p1 = np.array([1, 1, 1])
 shifts_p1_MHz = np.array([0., 159., 192.])
@@ -165,9 +165,7 @@ H0_A, Bq_A, Abasis = pylcp.hamiltonians.XFmolecules.Astate(
     J=1/2, I=1/2, P=+1, a=(3/2*4.8), glprime=-3*.0211,
     muB=cts.value('Bohr magneton in Hz/T')/1e6*1e-4, return_basis=True
     )
-n_A = H0_A.shape[0]
-n_states = 4*n_X + n_A
-iA = 4*n_X                                  # first excited index
+
 
 dijq_raw = XFmolecules.dipoleXandAstates(X_bases[0], Abasis, I=1/2, S=1/2)
 dijq = {v: np.einsum('ij,qjk->qik', U_X[v].T, dijq_raw) for v in range(4)}
@@ -182,7 +180,7 @@ MW_PRE_EVOLVE = True
 
 pol_mw = np.array([0., 1., 1.])/np.sqrt(2.)
 det_mw_kHz = 0.0
-Omega_mw_kHZ = 100.
+Omega_mw_kHz = 100.
 
 H0_N0, Bq_N0, U_N0, N0basis = pylcp.hamiltonians.XFmolecules.Xstate(
     N=0, I=1/2, B=7233.8271, gamma=-13.41679,
@@ -194,14 +192,68 @@ H0_N0, Bq_N0, U_N0, N0basis = pylcp.hamiltonians.XFmolecules.Xstate(
 n_N0 = H0_N0.shape[0]
 
 
+def _dq_rotational(bas_u, bas_l, U_u, U_l):
+    """<N'J'F'm'|T_q^1|NJFm> = (-1)^(F'-m')(F' 1 F; -m' q m) <N'J'F'|d|NJF>
+    <N'J'F'|d|NJF> = (-1)^(J'+I+F+1) sqrt((2F'+1)(2F+1)){J' F' I; F J 1} <N'J'|d|NJ>
+    <N'J'|d|NJ> = (-1)^(N'+S+J+1) sqrt((2J'+1)(2J+1)){N' N' S; J N 1} <N'|d|N>
+    <N'|d|N>=1"""
+    I_n, S_n = 0.5, 0.5
+    d = np.zeros((3, len(bas_u), len(bas_l)))
+    for a, su in enumerate(bas_u):
+        _, Nu, Ju, Fu, mu, _ = su
+        for b, sl in enumerate(bas_l):
+            _, Nl, Jl, Fl, ml, _ = sl
+            for iq, q in enumerate([-1., 0., 1.]):
+                d[iq, a, b] = (
+                    (-1)**(Fu - mu)*_w3j(Fu, 1, Fl, -mu, q, ml)
+                    * (-1)**(Ju + I_n + Fl + 1)
+                    * np.sqrt((2*Fu + 1)*(2*Fl + 1))
+                    * _w6j(Ju, Fu, I_n, Fl, Jl, 1)
+                    * (-1)**(Nu + S_n + Jl + 1)
+                    * np.sqrt((2*Ju + 1)*(2*Jl + 1))
+                    * _w6j(Nu, Ju, S_n, Jl, Nl, 1))
+    return np.einsum('ij,qjk,kl->qil', U_u.T, d, U_l)
+
+M_mw_q = _dq_rotational(X_bases[0], N0basis, U_X[0], U_N0) # (3, 12, 4)
+
+# d.E = sum_q (-1)^q dq eps_{-q} and calibrate
+eps_mw = cart2spherical(pol_mw)
+C_mw = np.zeros((n_X, n_N0), dtype=complex)
+for iq, q in enumerate([-1, 0, 1]):
+    C_mw += (-1)**q * M_mw_q[iq]*eps_mw[2-iq]
+Omega_mw_G = Omega_mw_kHz*1e-3/gamma_MHz
+C_mw *= 0.5*Omega_mw_G/np.abs(C_mw).max()
+
+# construct mw hamiltonian
+_diagX0 = np.round(np.diag(H0_X[0]).real, 6)
+_EX0u, _cX0u = np.unique(_diagX0, return_counts=True)
+E_F2_MHz = float(_EX0u[_cX0u == 5][0])
+idx_F2_X0 = np.where(_diagX0 == E_F2_MHz)[0]
+assert len(idx_F2_X0) == 5, "X0 F=2 manifold not found"
+
+_diagN0 = np.round(np.diag(H0_N0).real, 6)
+_EN0u, _cN0u = np.unique(_diagN0, return_counts=True)
+E_N0F1_MHz = float(_EN0u[_cN0u == 3][0])
+idx_N0F1_loc = np.where(_diagN0 == E_N0F1_MHz)[0]    # within the 4-block
+assert len(idx_N0F1_loc) == 3, "N=0 F=1 manifold not found"
+
+det_mw_G = det_mw_kHz*1e-3/gamma_MHz
+H_N0_frame = (H0_N0/gamma_MHz + (E_F2_MHz - E_N0F1_MHz)/gamma_MHz*np.eye(n_N0)
+            - det_mw_G*np.eye(n_N0))
+
+print(f"microwaves: ON={MW_ON}, Omega = {Omega_mw_kHz} kHz "
+      f"({Omega_mw_G:.2e} Gamma), det = {det_mw_kHz} kHz")
 
 
-def build_ham(v_list):
+def build_ham(v_list, with_N0):
     """pyLCP hamiltonian containing the X(v) manifolds in v_list + A."""
     hm = pylcp.hamiltonian(mass=mass)
     for v in v_list:
         hm.add_H_0_block(f'X{v}', H0_X[v]/gamma_MHz)
         hm.add_mu_q_block(f'X{v}', Bq_X[v]/gamma_MHz)
+    if with_N0:
+        hm.add_H_0_block('N0', H_N0_frame)
+        hm.add_mu_q_block('N0', Bq_N0/gamma_MHz)
     hm.add_H_0_block('A', H0_A/gamma_MHz)
     hm.add_mu_q_block('A', Bq_A/gamma_MHz)
     ks = {0: 1., 1: k_v1, 2: w_p1/583e-9, 3: w_p1/600e-9}
@@ -209,8 +261,12 @@ def build_ham(v_list):
         hm.add_d_q_block(f'X{v}', 'A', d_blk[v], k=ks[v])
     return hm
 
-ham = build_ham([0, 1, 2, 3])
+ham = build_ham([0, 1, 2, 3], MW_ON)
 
+n_A = H0_A.shape[0]
+n_states = 4*n_X + n_A + (n_N0 if MW_ON else 0)
+iN0 = 4*n_X
+iA = n_states - n_A                                 # first excited index
 # ------------------------------------------------
 # Lasers
 def crossed_beam_s(s_max, wb, zc):
@@ -432,6 +488,27 @@ assert np.allclose(tot, np.eye(n_A), atol=1e-8), "decay not normalised to Gamma"
 # H_eff = H(t) - (i/2) sum_c C^dag C  (equals P_A here, asserted above)
 H_eff_static = H_static.astype(complex).copy()
 H_eff_static[iA:iA+n_A, iA:iA+n_A] += -0.5j*tot
+if MW_ON:
+    # static (RWA) microwave coupling X(v=0,N=1) <-> N=0; purely
+    # Hermitian, no decay -- lives entirely in the deterministic part
+    H_eff_static[0:n_X, iN0:iN0+n_N0] += C_mw
+    H_eff_static[iN0:iN0+n_N0, 0:n_X] += C_mw.conj().T
+
+# pre evolution
+if MW_ON and MW_PRE_EVOLVE:
+    from scipy.linalg import expm
+    idx_pre = np.r_[0:n_X, iN0:iN0+n_N0]
+    t_pre = (d_ap/v_f_SI)/tau                    # seconds -> 1/Gamma
+    H_pre = H_eff_static[np.ix_(idx_pre, idx_pre)]
+    D = H_pre - H_pre.conj().T
+    print("max|H-H^dag| =", np.nanmax(np.abs(D)), " hasNaN =", np.isnan(H_pre).any())
+    print("labels:", ham.state_labels, " ns:", ham.ns, " iN0:", iN0, " iA:", iA)
+    assert np.allclose(H_pre, H_pre.conj().T), "pre-evolution not unitary"
+    U_pre = expm(-1j*H_pre*t_pre)
+    print(f"MW pre-evolution: t_pre = {d_ap/v_f_SI*1e3:.2f} ms "
+          f"({t_pre:.0f} /Gamma), Omega*t_pre = "
+          f"{2*np.pi*Omega_mw_kHz*1e3*(d_ap/v_f_SI):.1f} rad")
+
 
 
 @njit(cache=True)
@@ -652,7 +729,7 @@ def mcwf_trajectory(psi0, Hs, Mb, rows, dels, colour, polgrp, om_pol, cosb, sinb
 # unravelling shows up as disagreement in the excited population.
 if RUN_VALIDATION:
     print("\n--- validating MCWF against pylcp.obe (reduced X0+A system) ---")
-    ham_red = build_ham([0])
+    ham_red = build_ham([0], False)
     ham_red.make_full_matrices()
     lb_red = {'X0->A': laserBeams['X0->A']}
     r_val = np.array([0., 0., z_laser])
@@ -829,6 +906,9 @@ for m in range(N_MC):
     i0 = int(rng.integers(n_X))
     psi0 = np.zeros(n_states, complex)
     psi0[i0] = 1.
+
+    if MW_ON and MW_PRE_EVOLVE:
+        psi0[idx_pre] = U_pre @ psi0[idx_pre]
 
     dels_m = dels - kxs*vx
     nph, vf, _ = mcwf_trajectory(psi0, H_eff_static, Mb, rows, dels_m,

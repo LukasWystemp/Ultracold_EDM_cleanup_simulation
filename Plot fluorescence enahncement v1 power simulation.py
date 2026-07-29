@@ -29,10 +29,13 @@ val_0_8_46 = 11.6
 power_sim_8_46 = np.array([30])
 vals_8_46 = np.array([19.3])
 
-
+power_sim_22_32 = np.array([44])
+val_0_22_32 = 15.2
+vals_22_32 = np.array([46.6])
 
 r_31 = vals_31_56 / val_0_31_56
 r_8 = vals_8_46 / val_0_8_46
+r_22 = vals_22_32 / val_0_22_32
 
 
 def sqrt_model(x, a, b, c):
@@ -63,7 +66,7 @@ ax.plot(port_a_power, r_measured_31_56, label="Measured, 31.56ms", color="tab:re
 
 ax.scatter(power_sim_31_56, r_31, label="Simulation, 31.56ms", color="tab:red", marker="o", zorder=5)
 ax.scatter(power_sim_8_46, r_8, label="Simulation, 8.46ms", color="tab:purple", marker="o", zorder=5)
-#ax.scatter(power_sim_22_3, r_22, label="Simulation, 22.32ms", color="tab:green", marker="o", zorder=5)
+ax.scatter(power_sim_22_32, r_22, label="Simulation, 22.32ms", color="tab:green", marker="o", zorder=5)
 
 ax.set_ylim(1, 5)
 ax.set_xlim(5, 45)
@@ -105,12 +108,13 @@ vals_8_46 = np.array([19.3])
 
 
 
-sim_bins = np.array([8.46, 31.56])
+sim_bins = np.array([8.46, 22.32, 31.56])
 
 
 
-powers_30_w = np.array([19.3/val_0_8_46, 51.9/val_0_31_56])
-powers_14_w = np.array([np.nan, 40.3/val_0_31_56])
+powers_30_w = np.array([19.3/val_0_8_46, np.nan, 51.9/val_0_31_56])
+powers_14_w = np.array([np.nan, np.nan, 40.3/val_0_31_56])
+powers_44_w = np.array([np.nan, 46.6/val_0_22_32, np.nan])
 
 datasets = [
     (r_measured_6, "6mW", "tab:red"),
@@ -126,7 +130,7 @@ fig, ax = plt.subplots()
 
 ax.scatter(sim_bins, powers_14_w, label="Simulation, 15mW", color="tab:orange", marker="v", zorder=5, s=50)
 ax.scatter(sim_bins, powers_30_w, label="Simulation, 30mW", color="tab:green", marker="v", zorder=5, s=50)
-#ax.scatter(sim_bins, powers_44_w, label="Simulation, 44mW", color="tab:purple", marker="v", zorder=5, s=50)
+ax.scatter(sim_bins, powers_44_w, label="Simulation, 44mW", color="tab:purple", marker="v", zorder=5, s=50)
 
 x_fit = np.linspace(5, 34, 100)
 for data, label, color in datasets:
