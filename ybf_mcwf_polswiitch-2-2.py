@@ -41,6 +41,9 @@ from numba import njit
 import matplotlib.pyplot as plt
 import time
 from pylcp.hamiltonians import wigner_3j as _w3j, wigner_6j as _w6j
+from itertools import product
+from multiprocessing import Pool
+import traceback, os
 
 t_begin = time.time()
 
@@ -259,10 +262,6 @@ def hf_levels(H0):
     E, cnt = np.unique(np.round(np.diag(H0), 6), return_counts=True)
     return E/gamma_MHz, cnt
 
- 
-B_vec = np.array([0.08, -0.13, 0.1]) # in Gauss
-magField = pylcp.constantMagneticField(B_vec)
-Bq_sph = cart2spherical(B_vec)
 
 # -----------------------------------------------------------------------
 # Geometry
@@ -305,7 +304,7 @@ def sample_transverse(rng, v_f_SI):
 # reference position, and verify numerically that the block evolves as
 # M_b * exp(i*delta*t) (pyLCP fields carry exp(+i delta t)).
 
-def extract_beam_blocks(key_row, laserBeams, ham, H_static, iA, n_A, x0, y0=0.):
+def extract_beam_blocks(key_row, laserBeams, ham, H_static, Bq_sph, iA, n_A, x0, y0=0.):
     """Coupling blocks for all beams at transverse position x0 (peak env)."""
     r_ref = np.array([x0, y0, z_laser])
     Ms, rows, dels, kxs = [], [], [], []
@@ -555,7 +554,7 @@ def mcwf_trajectory(psi0, Hs, Mb, rows, dels, colour, polgrp, om_pol, cosb, sinb
 # Reduced system {X0, A}, static molecule at beam centre, main laser only.
 # Any error in field conventions, phases, Zeeman terms or the jump
 # unravelling shows up as disagreement in the excited population.
-def run_validation(d_blk, laserBeams, deltas_p1, n_A):
+def run_validation(d_blk, laserBeams, deltas_p1, magField, Bq_sph, n_A):
     print("\n--- validating MCWF against pylcp.obe (reduced X0+A system) ---")
     ham_red = build_ham([0], d_blk, None, False)
     ham_red.make_full_matrices()
@@ -698,353 +697,373 @@ def run_validation(d_blk, laserBeams, deltas_p1, n_A):
     ax0.legend(); fig0.savefig('mcwf_vs_obe_validation_nov1.png', dpi=150)
 
 
-def run(time_bin, P_v1):
-    # Setup
-    V1_ON = True if np.isclose(np.array([P_v1]), np.array([0.])) else False
-    time_bin *= 1e-3
-    P_v1 *= 1e-3
-    print(f"\nTime bin: {time_bin*1e3} ms | PV1: {P_v1*1e3} mW\n")
+def run(inp):
+    try:
+        # Setup
+        time_bin, P_v1 = inp
+        V1_ON = False if np.isclose(np.array([P_v1]), np.array([0.])) else True
+        time_bin *= 1e-3
+        P_v1 *= 1e-3
+        print(f"\nTime bin: {time_bin*1e3} ms | PV1: {P_v1*1e3} mW\n")
 
-    s_p1 = power_to_s(P_p1, frac_p1, sigma_m, w_p1)
-    s_v1 = power_to_s(P_v1, frac_v1, sigma_m, w_v1)
-    print("peak s per sideband: main", np.array2string(s_p1, precision=1),
-        " repump", np.array2string(s_v1, precision=1))
-    print(f"P1 power {P_p1} W")
-    print(f"V1 power {P_v1} W")
+        s_p1 = power_to_s(P_p1, frac_p1, sigma_m, w_p1)
+        s_v1 = power_to_s(P_v1, frac_v1, sigma_m, w_v1)
+        print("peak s per sideband: main", np.array2string(s_p1, precision=1),
+            " repump", np.array2string(s_v1, precision=1))
+        print(f"P1 power {P_p1} W")
+        print(f"V1 power {P_v1} W")
 
-    gL_p1 = np.pi*linewidth_p1_Hz*tau   # pi*FWHM * tau = phase diffusion D
-    gL_v1 = np.pi*linewidth_v1_Hz*tau
+        gL_p1 = np.pi*linewidth_p1_Hz*tau   # pi*FWHM * tau = phase diffusion D
+        gL_v1 = np.pi*linewidth_v1_Hz*tau
 
-    # Polarisation
-    cosb_pol = np.cos(np.pi/4. + POL_DBETA)
-    sinb_pol = np.sin(np.pi/4. + POL_DBETA)
-    print(f"EOM pol cycle (y -> sigma -> z -> sigma'): {f_EOM/1e6:.2f} MHz "
-        f"(period {T_switch:.1f} /Gamma), dbeta = {POL_DBETA:.3f} rad")
+        # Polarisation
+        cosb_pol = np.cos(np.pi/4. + POL_DBETA)
+        sinb_pol = np.sin(np.pi/4. + POL_DBETA)
+        print(f"EOM pol cycle (y -> sigma -> z -> sigma'): {f_EOM/1e6:.2f} MHz "
+            f"(period {T_switch:.1f} /Gamma), dbeta = {POL_DBETA:.3f} rad")
 
-    y0_arr = np.zeros(N_MC)
+        y0_arr = np.zeros(N_MC)
 
-    # Velocity
-    v_forward = L_flight/time_bin/v_unit 
-    print(f"Forward velocity {L_flight/time_bin:.2f} ms^-1 with time bin {time_bin} s")
-    v_vec = np.array([0., 0., v_forward])
-    t_max = (20*mm)/v_forward
+        # Velocity
+        v_forward = L_flight/time_bin/v_unit 
+        print(f"Forward velocity {L_flight/time_bin:.2f} ms^-1 with time bin {time_bin} s")
+        v_vec = np.array([0., 0., v_forward])
+        t_max = (20*mm)/v_forward
 
-    v_f_SI = L_flight/time_bin
-    v_perp_max = (R_ap_SI + r_source)*v_f_SI/R_s
-    print(f"two-aperture acceptance: |v_perp| on axis <= "
-      f"{r_source*v_f_SI/R_s:.3f} m/s, absolute max {v_perp_max:.3f} m/s; "
-      f"r_max = {r_max_SI*1e3:.2f} mm; "
-      f"max Doppler {v_perp_max/w_p1/1e6:.3f} MHz "
-      f"= {v_perp_max/w_p1/1e6/gamma_MHz:.4f} Gamma")
+        v_f_SI = L_flight/time_bin
+        v_perp_max = (R_ap_SI + r_source)*v_f_SI/R_s
+        print(f"two-aperture acceptance: |v_perp| on axis <= "
+        f"{r_source*v_f_SI/R_s:.3f} m/s, absolute max {v_perp_max:.3f} m/s; "
+        f"r_max = {r_max_SI*1e3:.2f} mm; "
+        f"max Doppler {v_perp_max/w_p1/1e6:.3f} MHz "
+        f"= {v_perp_max/w_p1/1e6/gamma_MHz:.4f} Gamma")
 
-    # d
-    dijq_raw = XFmolecules.dipoleXandAstates(X_bases[0], Abasis, I=1/2, S=1/2)
-    dijq = {v: np.einsum('ij,qjk->qik', U_X[v].T, dijq_raw) for v in range(4)}
-    d_blk = {v: np.sqrt(fcf[v])*dijq[v] for v in range(4)}   # (3, 12, 4) each, 
-    # maps 4 excited A amplitudes down into the 12 sublevels of ground manifold v, 
-    # for emitted polarization q.
+        # d
+        dijq_raw = XFmolecules.dipoleXandAstates(X_bases[0], Abasis, I=1/2, S=1/2)
+        dijq = {v: np.einsum('ij,qjk->qik', U_X[v].T, dijq_raw) for v in range(4)}
+        d_blk = {v: np.sqrt(fcf[v])*dijq[v] for v in range(4)}   # (3, 12, 4) each, 
+        # maps 4 excited A amplitudes down into the 12 sublevels of ground manifold v, 
+        # for emitted polarization q.
 
-    # -----------------------------------------
-    # Microwaves
-    # d.E = sum_q (-1)^q dq eps_{-q} and calibrate
+        # -----------------------------------------
+        # Microwaves
+        # d.E = sum_q (-1)^q dq eps_{-q} and calibrate
 
-    M_mw_q = _dq_rotational(X_bases[0], N0basis, U_X[0], U_N0) # (3, 12, 4)
-
-
-    eps_mw = cart2spherical(pol_mw)
-    C_mw = np.zeros((n_X, n_N0), dtype=complex)
-    for iq, q in enumerate([-1, 0, 1]):
-        C_mw += (-1)**q * M_mw_q[iq]*eps_mw[2-iq]
-    Omega_mw_G = Omega_mw_kHz*1e-3/gamma_MHz
-    C_mw *= 0.5*Omega_mw_G/np.abs(C_mw).max()
-
-    # construct mw hamiltonian
-    _diagX0 = np.round(np.diag(H0_X[0]).real, 6)
-    _EX0u, _cX0u = np.unique(_diagX0, return_counts=True)
-    E_F2_MHz = float(_EX0u[_cX0u == 5][0])
-    idx_F2_X0 = np.where(_diagX0 == E_F2_MHz)[0]
-    assert len(idx_F2_X0) == 5, "X0 F=2 manifold not found"
-
-    _diagN0 = np.round(np.diag(H0_N0).real, 6)
-    _EN0u, _cN0u = np.unique(_diagN0, return_counts=True)
-    E_N0F1_MHz = float(_EN0u[_cN0u == 3][0])
-    idx_N0F1_loc = np.where(_diagN0 == E_N0F1_MHz)[0]    # within the 4-block
-    assert len(idx_N0F1_loc) == 3, "N=0 F=1 manifold not found"
-
-    det_mw_G = det_mw_kHz*1e-3/gamma_MHz
-    H_N0_frame = (H0_N0/gamma_MHz + (E_F2_MHz - E_N0F1_MHz)/gamma_MHz*np.eye(n_N0)
-                - det_mw_G*np.eye(n_N0))
+        M_mw_q = _dq_rotational(X_bases[0], N0basis, U_X[0], U_N0) # (3, 12, 4)
 
 
-    print(f"microwaves: ON={MW_ON}, Omega = {Omega_mw_kHz} kHz "
-        f"({Omega_mw_G:.2e} Gamma), det = {det_mw_kHz} kHz")
+        eps_mw = cart2spherical(pol_mw)
+        C_mw = np.zeros((n_X, n_N0), dtype=complex)
+        for iq, q in enumerate([-1, 0, 1]):
+            C_mw += (-1)**q * M_mw_q[iq]*eps_mw[2-iq]
+        Omega_mw_G = Omega_mw_kHz*1e-3/gamma_MHz
+        C_mw *= 0.5*Omega_mw_G/np.abs(C_mw).max()
 
-    ham = build_ham([0, 1, 2, 3], d_blk, H_N0_frame, MW_ON)
+        # construct mw hamiltonian
+        _diagX0 = np.round(np.diag(H0_X[0]).real, 6)
+        _EX0u, _cX0u = np.unique(_diagX0, return_counts=True)
+        E_F2_MHz = float(_EX0u[_cX0u == 5][0])
+        idx_F2_X0 = np.where(_diagX0 == E_F2_MHz)[0]
+        assert len(idx_F2_X0) == 5, "X0 F=2 manifold not found"
 
-    n_A = H0_A.shape[0]
-    n_states = 4*n_X + n_A + (n_N0 if MW_ON else 0)
-    iN0 = 4*n_X
-    iA = n_states - n_A                                 # first excited index
+        _diagN0 = np.round(np.diag(H0_N0).real, 6)
+        _EN0u, _cN0u = np.unique(_diagN0, return_counts=True)
+        E_N0F1_MHz = float(_EN0u[_cN0u == 3][0])
+        idx_N0F1_loc = np.where(_diagN0 == E_N0F1_MHz)[0]    # within the 4-block
+        assert len(idx_N0F1_loc) == 3, "N=0 F=1 manifold not found"
 
-
-    E_X0_hf, cnt_X0 = hf_levels(H0_X[0])
-    E_X1_hf, cnt_X1 = hf_levels(H0_X[1])
-    E_A_F1 = np.max(np.diag(H0_A))/gamma_MHz
-
-    # P1: carrier resonant with F=1^- plus sidebands at the fixed lab RF
-    # offsets. A higher ground level means a smaller X->A gap, so shifting
-    # the addressed level UP by `shift` lowers the beam's delta by shift.
-    deltas_p1 = (E_A_F1 - E_X0_hf[0]) - shifts_p1_MHz/gamma_MHz + det_p1
-    # V1: one sideband per v=1 hyperfine level, on resonance (unchanged).
-    deltas_v1 = E_A_F1 - E_X1_hf + det_v1          # <-- v=1 energies, not v=0
-    assert len(deltas_v1) == 4, "hyperfine degeneracy split"
-    assert len(deltas_p1) == len(frac_p1) == len(shifts_p1_MHz)
-
-
-    if V1_ON:
-        laserBeams = {'X0->A': beam_pair(1., s_p1, deltas_p1),
-                    'X1->A': beam_pair(k_v1, s_v1, deltas_v1)
-                    }
-
-        # Rate-equation reference: rateeq cannot gate beams in time, so use the
-        # time average of the square wave -- both polarisations on at s/2.
-        laserBeams_re = {'X0->A': beam_pair(1., s_p1, deltas_p1, s_scale=0.5),
-                        'X1->A': beam_pair(k_v1, s_v1, deltas_v1, s_scale=0.5)
-                    }
-    else:
-        laserBeams = {'X0->A': beam_pair(1., s_p1, deltas_p1)}
-        laserBeams_re = {'X0->A': beam_pair(1., s_p1, deltas_p1, s_scale=0.5)}
+        det_mw_G = det_mw_kHz*1e-3/gamma_MHz
+        H_N0_frame = (H0_N0/gamma_MHz + (E_F2_MHz - E_N0F1_MHz)/gamma_MHz*np.eye(n_N0)
+                    - det_mw_G*np.eye(n_N0))
 
 
-    # F-label diagnostic (just in case)
-    F_of_count = {1: 'F=0', 3: 'F=1', 5: 'F=2'}
-    print("P1/X0 sidebands (carrier on F=1^-):")
-    for i, (sh, s_) in enumerate(zip(shifts_p1_MHz, s_p1)):
-        # laser detuning from each hyperfine transition, in MHz
-        # (positive = blue of that transition)
-        dets = sh - (E_X0_hf - E_X0_hf[0])*gamma_MHz
-        det_str = ", ".join(f"{F_of_count[c]}:{d:+6.1f}"
-                            for d, c in zip(dets, cnt_X0))
-        print(f"  [{i}] +{sh:5.1f} MHz frac={frac_p1[i]/np.sum(frac_p1):.3f} "
-            f"s={s_:.1f}  det/level (MHz): {det_str}")
-    print("V1/X1 sideband map (one per level, resonant):")
-    for i, (Ei, ci) in enumerate(zip(E_X1_hf, cnt_X1)):
-        print(f"  [{i}] {F_of_count[ci]:4s} E={Ei*gamma_MHz:8.1f} MHz "
-            f"frac={frac_v1[i]/np.sum(frac_v1):.3f}  s={s_v1[i]:.1f}")
+        print(f"microwaves: ON={MW_ON}, Omega = {Omega_mw_kHz} kHz "
+            f"({Omega_mw_G:.2e} Gamma), det = {det_mw_kHz} kHz")
+
+        ham = build_ham([0, 1, 2, 3], d_blk, H_N0_frame, MW_ON)
+
+        n_A = H0_A.shape[0]
+        n_states = 4*n_X + n_A + (n_N0 if MW_ON else 0)
+        iN0 = 4*n_X
+        iA = n_states - n_A                                 # first excited index
 
 
-    # ----------------------------------
-    # Reference: deterministic rate equations (known to be an overestimate
-    # for type-II transitions -- no coherent dark states)
-    n_photons_re = None
-    if RUN_RATEEQ:
-        rateeq = pylcp.rateeq(laserBeams_re, magField, ham,
-                            include_mag_forces=False)
-        rateeq.set_initial_position_and_velocity(np.zeros(3), v_vec)
-        pop0 = np.zeros(n_states)
-        pop0[:n_X] = 1./n_X
-        rateeq.set_initial_pop(pop0)
-        solr = rateeq.evolve_motion([0., t_max],
-                                    t_eval=np.linspace(0., t_max, 400),
-                                    rtol=1e-8, atol=1e-10)
-        P_A_re = solr.N[iA:iA+n_A].sum(axis=0)
-        n_photons_re = trapz(P_A_re, solr.t)
-        print(f"\nrate-equation reference: {n_photons_re:.1f} photons "
-            "(expected to overestimate)")
+        E_X0_hf, cnt_X0 = hf_levels(H0_X[0])
+        E_X1_hf, cnt_X1 = hf_levels(H0_X[1])
+        E_A_F1 = np.max(np.diag(H0_A))/gamma_MHz
+
+        # P1: carrier resonant with F=1^- plus sidebands at the fixed lab RF
+        # offsets. A higher ground level means a smaller X->A gap, so shifting
+        # the addressed level UP by `shift` lowers the beam's delta by shift.
+        deltas_p1 = (E_A_F1 - E_X0_hf[0]) - shifts_p1_MHz/gamma_MHz + det_p1
+        # V1: one sideband per v=1 hyperfine level, on resonance (unchanged).
+        deltas_v1 = E_A_F1 - E_X1_hf + det_v1          # <-- v=1 energies, not v=0
+        assert len(deltas_v1) == 4, "hyperfine degeneracy split"
+        assert len(deltas_p1) == len(frac_p1) == len(shifts_p1_MHz)
 
 
-    ham.make_full_matrices()
-    if V1_ON:
-        key_row = {'X0->A': 0, 'X1->A': n_X}
-    else:
-        key_row = {'X0->A': 0}
+        if V1_ON:
+            laserBeams = {'X0->A': beam_pair(1., s_p1, deltas_p1),
+                        'X1->A': beam_pair(k_v1, s_v1, deltas_v1)
+                        }
 
-
-    H_static = ham.return_full_H(zero_Eq(laserBeams), Bq_sph)
-    assert np.allclose(H_static, H_static.conj().T), "H_static not Hermitian"
-
-
-    # Jump (collapse) operators: one per (v, q) decay channel, C = d_blk[v][q]
-    # mapping A -> X(v). Total sum C^dag C must equal identity on A (rate = Gamma).
-    L_ops = np.array([d_blk[v][q] for v in range(4) for q in range(3)])  # (12,12,4)
-    L_v = np.array([v for v in range(4) for q in range(3)], dtype=np.int64)
-    tot = sum(L.conj().T @ L for L in L_ops)
-    assert np.allclose(tot, np.eye(n_A), atol=1e-8), "decay not normalised to Gamma"
-
-    # H_eff = H(t) - (i/2) sum_c C^dag C  (equals P_A here, asserted above)
-    H_eff_static = H_static.astype(complex).copy()
-    H_eff_static[iA:iA+n_A, iA:iA+n_A] += -0.5j*tot
-    if MW_ON:
-        # static (RWA) microwave coupling X(v=0,N=1) <-> N=0; purely
-        # Hermitian, no decay -- lives entirely in the deterministic part
-        H_eff_static[0:n_X, iN0:iN0+n_N0] += C_mw
-        H_eff_static[iN0:iN0+n_N0, 0:n_X] += C_mw.conj().T
-
-    # pre evolution
-    if MW_ON and MW_PRE_EVOLVE:
-        from scipy.linalg import expm
-        idx_pre = np.r_[0:n_X, iN0:iN0+n_N0]
-        t_pre = (d_ap/v_f_SI)/tau                    # seconds -> 1/Gamma
-        T_PRE_JITTER = 0.05
-        H_pre = H_eff_static[np.ix_(idx_pre, idx_pre)]
-        D = H_pre - H_pre.conj().T
-        print("max|H-H^dag| =", np.nanmax(np.abs(D)), " hasNaN =", np.isnan(H_pre).any())
-        print("labels:", ham.state_labels, " ns:", ham.ns, " iN0:", iN0, " iA:", iA)
-        assert np.allclose(H_pre, H_pre.conj().T), "pre-evolution not unitary"
-        E_pre, V_pre = np.linalg.eigh(H_pre)
-        #U_pre = expm(-1j*H_pre*t_pre)
-        print(f"MW pre-evolution: t_pre = {d_ap/v_f_SI*1e3:.2f} ms "
-            f"({t_pre:.0f} /Gamma) +/- {100*T_PRE_JITTER:.0f}%, "
-            f"Omega*t_pre = "
-            f"{2*np.pi*Omega_mw_kHz*1e3*(d_ap/v_f_SI):.1f} rad "
-            f"(jitter spans {Omega_mw_kHz*1e3*t_pre*tau*2*T_PRE_JITTER:.1f} "
-            f"Rabi periods)")
-
-    if RUN_VALIDATION:
-        run_validation(d_blk, laserBeams, deltas_p1, n_A)
-
-        
-    # -------------------------------------------------------
-    # Production: full 52-state transit ensemble
-    print(f"\n--- MCWF ensemble: {N_MC} molecules through the beams ---")
-    rng = np.random.default_rng(SEED)
-    # 16 main + 16 repump beams (4 sidebands x 2 directions x 2 EOM pols)
-    colour_arr = np.array([0]*4*len(deltas_p1) + [1]*4*len(deltas_v1), dtype=np.int64)
-    if V1_ON:
-        polgrp_arr = np.concatenate([polgrp_for(len(deltas_p1)),
-                                    polgrp_for(len(deltas_v1))])
-    else:
-        polgrp_arr = np.array(polgrp_for(len(deltas_p1)))
-    gL = np.array([gL_p1, gL_v1])
-
-    photons = np.zeros(N_MC, dtype=int)
-    v_final = np.zeros(N_MC, dtype=int)
-
-    # ensemble-accumulated observables (filled in-place by mcwf_trajectory)
-    n_tg = 400
-    tgrid_pop = np.linspace(0., t_max, n_tg)     # population sampling grid
-    pop_acc = np.zeros((n_tg, 5))                # X0..X3, A
-    n_jbins = 120
-    jump_hist = np.zeros(n_jbins)                # photon emission times
-
-    for m in range(N_MC):
-        x0 = rng.uniform(0., 2*np.pi)           # random standing-wave phase
-        xm, ym, vx_SI, vy_SI = sample_transverse(rng, v_f_SI)
-        if not TRANSVERSE_MOTION:
-            vx_SI = 0
-            vy_SI = 0
-        y0 = ym/x0_u
-        y0_arr[m] = y0
-        vx = vx_SI/v_unit; vy = vy_SI / v_unit
-        # y0 = 0 for block, y(t) applied inside mcfw
-        Mb, rows, dels, kxs = extract_beam_blocks(key_row, laserBeams, ham, H_static, iA, n_A, x0, 0.)
-
-        # Populate N=0, F=1 uniformly
-        if MW_ON:
-            i0 = iN0 + idx_N0F1_loc[rng.integers(3)]
+            # Rate-equation reference: rateeq cannot gate beams in time, so use the
+            # time average of the square wave -- both polarisations on at s/2.
+            laserBeams_re = {'X0->A': beam_pair(1., s_p1, deltas_p1, s_scale=0.5),
+                            'X1->A': beam_pair(k_v1, s_v1, deltas_v1, s_scale=0.5)
+                        }
         else:
-            i0 = int(rng.integers(n_X))
-        psi0 = np.zeros(n_states, complex)
-        psi0[i0] = 1.
+            laserBeams = {'X0->A': beam_pair(1., s_p1, deltas_p1)}
+            laserBeams_re = {'X0->A': beam_pair(1., s_p1, deltas_p1, s_scale=0.5)}
 
-        # pre evolution with jitter
-        u_jit = rng.random()
+
+        # F-label diagnostic (just in case)
+        F_of_count = {1: 'F=0', 3: 'F=1', 5: 'F=2'}
+        print("P1/X0 sidebands (carrier on F=1^-):")
+        for i, (sh, s_) in enumerate(zip(shifts_p1_MHz, s_p1)):
+            # laser detuning from each hyperfine transition, in MHz
+            # (positive = blue of that transition)
+            dets = sh - (E_X0_hf - E_X0_hf[0])*gamma_MHz
+            det_str = ", ".join(f"{F_of_count[c]}:{d:+6.1f}"
+                                for d, c in zip(dets, cnt_X0))
+            print(f"  [{i}] +{sh:5.1f} MHz frac={frac_p1[i]/np.sum(frac_p1):.3f} "
+                f"s={s_:.1f}  det/level (MHz): {det_str}")
+        print("V1/X1 sideband map (one per level, resonant):")
+        for i, (Ei, ci) in enumerate(zip(E_X1_hf, cnt_X1)):
+            print(f"  [{i}] {F_of_count[ci]:4s} E={Ei*gamma_MHz:8.1f} MHz "
+                f"frac={frac_v1[i]/np.sum(frac_v1):.3f}  s={s_v1[i]:.1f}")
+
+
+        B_vec = np.array([0.08, -0.13, 0.1]) # in Gauss
+        magField = pylcp.constantMagneticField(B_vec)
+        Bq_sph = cart2spherical(B_vec)
+
+        # ----------------------------------
+        # Reference: deterministic rate equations (known to be an overestimate
+        # for type-II transitions -- no coherent dark states)
+        n_photons_re = None
+        if RUN_RATEEQ:
+            rateeq = pylcp.rateeq(laserBeams_re, magField, ham,
+                                include_mag_forces=False)
+            rateeq.set_initial_position_and_velocity(np.zeros(3), v_vec)
+            pop0 = np.zeros(n_states)
+            pop0[:n_X] = 1./n_X
+            rateeq.set_initial_pop(pop0)
+            solr = rateeq.evolve_motion([0., t_max],
+                                        t_eval=np.linspace(0., t_max, 400),
+                                        rtol=1e-8, atol=1e-10)
+            P_A_re = solr.N[iA:iA+n_A].sum(axis=0)
+            n_photons_re = trapz(P_A_re, solr.t)
+            print(f"\nrate-equation reference: {n_photons_re:.1f} photons "
+                "(expected to overestimate)")
+
+
+        ham.make_full_matrices()
+        if V1_ON:
+            key_row = {'X0->A': 0, 'X1->A': n_X}
+        else:
+            key_row = {'X0->A': 0}
+
+
+        H_static = ham.return_full_H(zero_Eq(laserBeams), Bq_sph)
+        assert np.allclose(H_static, H_static.conj().T), "H_static not Hermitian"
+
+
+        # Jump (collapse) operators: one per (v, q) decay channel, C = d_blk[v][q]
+        # mapping A -> X(v). Total sum C^dag C must equal identity on A (rate = Gamma).
+        L_ops = np.array([d_blk[v][q] for v in range(4) for q in range(3)])  # (12,12,4)
+        L_v = np.array([v for v in range(4) for q in range(3)], dtype=np.int64)
+        tot = sum(L.conj().T @ L for L in L_ops)
+        assert np.allclose(tot, np.eye(n_A), atol=1e-8), "decay not normalised to Gamma"
+
+        # H_eff = H(t) - (i/2) sum_c C^dag C  (equals P_A here, asserted above)
+        H_eff_static = H_static.astype(complex).copy()
+        H_eff_static[iA:iA+n_A, iA:iA+n_A] += -0.5j*tot
+        if MW_ON:
+            # static (RWA) microwave coupling X(v=0,N=1) <-> N=0; purely
+            # Hermitian, no decay -- lives entirely in the deterministic part
+            H_eff_static[0:n_X, iN0:iN0+n_N0] += C_mw
+            H_eff_static[iN0:iN0+n_N0, 0:n_X] += C_mw.conj().T
+
+        # pre evolution
         if MW_ON and MW_PRE_EVOLVE:
-            t_m = t_pre*(1. + T_PRE_JITTER*(2.*u_jit - 1.))
-            c = V_pre.conj().T @ psi0[idx_pre]
-            psi0[idx_pre] = V_pre @ (np.exp(-1j*E_pre*t_m)*c)
+            from scipy.linalg import expm
+            idx_pre = np.r_[0:n_X, iN0:iN0+n_N0]
+            t_pre = (d_ap/v_f_SI)/tau                    # seconds -> 1/Gamma
+            T_PRE_JITTER = 0.05
+            H_pre = H_eff_static[np.ix_(idx_pre, idx_pre)]
+            D = H_pre - H_pre.conj().T
+            print("max|H-H^dag| =", np.nanmax(np.abs(D)), " hasNaN =", np.isnan(H_pre).any())
+            print("labels:", ham.state_labels, " ns:", ham.ns, " iN0:", iN0, " iA:", iA)
+            assert np.allclose(H_pre, H_pre.conj().T), "pre-evolution not unitary"
+            E_pre, V_pre = np.linalg.eigh(H_pre)
+            #U_pre = expm(-1j*H_pre*t_pre)
+            print(f"MW pre-evolution: t_pre = {d_ap/v_f_SI*1e3:.2f} ms "
+                f"({t_pre:.0f} /Gamma) +/- {100*T_PRE_JITTER:.0f}%, "
+                f"Omega*t_pre = "
+                f"{2*np.pi*Omega_mw_kHz*1e3*(d_ap/v_f_SI):.1f} rad "
+                f"(jitter spans {Omega_mw_kHz*1e3*t_pre*tau*2*T_PRE_JITTER:.1f} "
+                f"Rabi periods)")
+
+        if RUN_VALIDATION:
+            run_validation(d_blk, laserBeams, deltas_p1, magField, Bq_sph, n_A)
+
+            
+        # -------------------------------------------------------
+        # Production: full 52-state transit ensemble
+        print(f"\n--- MCWF ensemble: {N_MC} molecules through the beams ---")
+        rng = np.random.default_rng(SEED)
+        # 16 main + 16 repump beams (4 sidebands x 2 directions x 2 EOM pols)
+        colour_arr = np.array([0]*4*len(deltas_p1) + [1]*4*len(deltas_v1), dtype=np.int64)
+        if V1_ON:
+            polgrp_arr = np.concatenate([polgrp_for(len(deltas_p1)),
+                                        polgrp_for(len(deltas_v1))])
+        else:
+            polgrp_arr = np.array(polgrp_for(len(deltas_p1)))
+        gL = np.array([gL_p1, gL_v1])
+
+        photons = np.zeros(N_MC, dtype=int)
+        v_final = np.zeros(N_MC, dtype=int)
+
+        # ensemble-accumulated observables (filled in-place by mcwf_trajectory)
+        n_tg = 400
+        tgrid_pop = np.linspace(0., t_max, n_tg)     # population sampling grid
+        pop_acc = np.zeros((n_tg, 5))                # X0..X3, A
+        n_jbins = 120
+        jump_hist = np.zeros(n_jbins)                # photon emission times
+
+        for m in range(N_MC):
+            x0 = rng.uniform(0., 2*np.pi)           # random standing-wave phase
+            xm, ym, vx_SI, vy_SI = sample_transverse(rng, v_f_SI)
+            if not TRANSVERSE_MOTION:
+                vx_SI = 0
+                vy_SI = 0
+            y0 = ym/x0_u
+            y0_arr[m] = y0
+            vx = vx_SI/v_unit; vy = vy_SI / v_unit
+            # y0 = 0 for block, y(t) applied inside mcfw
+            Mb, rows, dels, kxs = extract_beam_blocks(key_row, laserBeams, ham, H_static, Bq_sph, iA, n_A, x0, 0.)
+
+            # Populate N=0, F=1 uniformly
+            if MW_ON:
+                i0 = iN0 + idx_N0F1_loc[rng.integers(3)]
+            else:
+                i0 = int(rng.integers(n_X))
+            psi0 = np.zeros(n_states, complex)
+            psi0[i0] = 1.
+
+            # pre evolution with jitter
+            u_jit = rng.random()
+            if MW_ON and MW_PRE_EVOLVE:
+                t_m = t_pre*(1. + T_PRE_JITTER*(2.*u_jit - 1.))
+                c = V_pre.conj().T @ psi0[idx_pre]
+                psi0[idx_pre] = V_pre @ (np.exp(-1j*E_pre*t_m)*c)
 
 
-        dels_m = dels - kxs*vx
-        nph, vf, _ = mcwf_trajectory(psi0, H_eff_static, Mb, rows, dels_m,
-                                    colour_arr, polgrp_arr, om_pol, 
-                                    cosb_pol, sinb_pol, L_ops, L_v,
-                                    v_forward, z_laser, y0, vy, w_beam, gL,
-                                    DT, t_max, 0., int(rng.integers(2**31)),
-                                    tgrid_pop, pop_acc, jump_hist, V1_ON)
+            dels_m = dels - kxs*vx
+            nph, vf, _ = mcwf_trajectory(psi0, H_eff_static, Mb, rows, dels_m,
+                                        colour_arr, polgrp_arr, om_pol, 
+                                        cosb_pol, sinb_pol, L_ops, L_v,
+                                        v_forward, z_laser, y0, vy, w_beam, gL,
+                                        DT, t_max, 0., int(rng.integers(2**31)),
+                                        tgrid_pop, pop_acc, jump_hist, V1_ON)
 
-        photons[m], v_final[m] = nph, vf
-        if (m+1) % 10 == 0:
-            print(f"  {m+1}/{N_MC}: running mean = {photons[:m+1].mean():.1f}")
+            photons[m], v_final[m] = nph, vf
+            if (m+1) % 10 == 0:
+                print(f"  {m+1}/{N_MC}: running mean = {photons[:m+1].mean():.1f}")
 
-    pop_acc /= N_MC                              # ensemble-average populations
+        pop_acc /= N_MC                              # ensemble-average populations
 
-    print("\n--- MCWF photon statistics ---")
-    print(f"mean photons/molecule: {photons.mean():.1f} "
-        f"+/- {photons.std()/np.sqrt(N_MC):.1f}")
-    print(f"std / median / max:    {photons.std():.1f} / "
-        f"{np.median(photons):.0f} / {photons.max()}")
-    if n_photons_re is not None:
-        print(f"(rate equations gave {n_photons_re:.1f} -- "
-            f"coherent dark states reduce this by "
-            f"x{n_photons_re/max(photons.mean(),1e-9):.1f})")
-    for v in range(4):
-        frac = np.mean(v_final == v)
-        if frac > 0:
-            print(f"fraction ending in X(v={v}): {frac:.2f}, "
-                f"<photons|v={v}> = {photons[v_final == v].mean():.1f}")
+        print("\n--- MCWF photon statistics ---")
+        print(f"mean photons/molecule: {photons.mean():.1f} "
+            f"+/- {photons.std()/np.sqrt(N_MC):.1f}")
+        print(f"std / median / max:    {photons.std():.1f} / "
+            f"{np.median(photons):.0f} / {photons.max()}")
+        if n_photons_re is not None:
+            print(f"(rate equations gave {n_photons_re:.1f} -- "
+                f"coherent dark states reduce this by "
+                f"x{n_photons_re/max(photons.mean(),1e-9):.1f})")
+        for v in range(4):
+            frac = np.mean(v_final == v)
+            if frac > 0:
+                print(f"fraction ending in X(v={v}): {frac:.2f}, "
+                    f"<photons|v={v}> = {photons[v_final == v].mean():.1f}")
 
-    fig, axs = plt.subplots(3, 1)
-    bins = np.arange(0, photons.max()+4, max(1, photons.max()//30))
-    axs[0].hist(photons[v_final <= 1], bins=bins, alpha=0.6, label='bright (v=0,1)')
-    axs[0].hist(photons[v_final >= 2], bins=bins, alpha=0.6, label='dark (v=2,3)')
-    axs[0].axvline(photons.mean(), color='k', ls='--',
-            label=f'mean = {photons.mean():.1f}')
-    axs[0].set_xlabel('photons per molecule'); axs[0].set_ylabel('molecules')
-    axs[0].legend(); #fig.savefig('photon_histogram_mcwf_nov1.png', dpi=150)
+        fig, axs = plt.subplots(3, 1, figsize=(4, 12))
+        bins = np.arange(0, photons.max()+4, max(1, photons.max()//30))
+        axs[0].hist(photons[v_final <= 1], bins=bins, alpha=0.6, label='bright (v=0,1)')
+        axs[0].hist(photons[v_final >= 2], bins=bins, alpha=0.6, label='dark (v=2,3)')
+        axs[0].axvline(photons.mean(), color='k', ls='--',
+                label=f'mean = {photons.mean():.1f}')
+        axs[0].set_xlabel('photons per molecule'); axs[0].set_ylabel('molecules')
+        axs[0].legend(); #fig.savefig('photon_histogram_mcwf_nov1.png', dpi=150)
 
-    # ---------------------------------------------------------
-    # Photon emission rate vs time / distance (what a CCD along z sees).
-    # Molecules fly at constant v_forward, so z = v*t maps time directly
-    # onto position; the top axis is distance from the start (beam centre
-    # marked at z_laser).
-    v_real = v_forward*v_unit                    # m/s
-    t_to_us = tau*1e6                            # sim time -> microseconds
-    us_to_mm = v_real*1e-3                       # 100 m/s = 0.10 mm/us
+        # ---------------------------------------------------------
+        # Photon emission rate vs time / distance (what a CCD along z sees).
+        # Molecules fly at constant v_forward, so z = v*t maps time directly
+        # onto position; the top axis is distance from the start (beam centre
+        # marked at z_laser).
+        v_real = v_forward*v_unit                    # m/s
+        t_to_us = tau*1e6                            # sim time -> microseconds
+        us_to_mm = v_real*1e-3                       # 100 m/s = 0.10 mm/us
 
-    dt_bin = t_max/n_jbins
-    t_cent_us = (np.arange(n_jbins) + 0.5)*dt_bin*t_to_us
-    rate = jump_hist/N_MC/(dt_bin*t_to_us)       # photons /molecule /us
+        dt_bin = t_max/n_jbins
+        t_cent_us = (np.arange(n_jbins) + 0.5)*dt_bin*t_to_us
+        rate = jump_hist/N_MC/(dt_bin*t_to_us)       # photons /molecule /us
 
-    #fig2, ax2 = plt.subplots()
-    axs[1].plot(t_cent_us, rate, drawstyle='steps-mid')
-    axs[1].axvline(z_laser/mm/us_to_mm, color='k', ls=':', lw=1,
-                label=f'beam centre ({z_laser/mm:.0f} mm)')
-    axs[1].set_xlabel(r'time ($\mu$s)')
-    axs[1].set_ylabel(r'photons / molecule / $\mu$s')
-    secax2 = axs[1].secondary_xaxis(
-        'top', functions=(lambda t_us: t_us*us_to_mm,
-                        lambda z_mm: z_mm/us_to_mm))
-    secax2.set_xlabel('distance (mm)')
-    axs[1].legend()
-    #fig2.savefig('photon_rate_vs_time_mcwf.png', dpi=150)
-    np.save(f"CCD_simulation_ratefile_{time_bin}_ms_{P_v1}_mW.npy", rate)
+        #fig2, ax2 = plt.subplots()
+        axs[1].plot(t_cent_us, rate, drawstyle='steps-mid')
+        axs[1].axvline(z_laser/mm/us_to_mm, color='k', ls=':', lw=1,
+                    label=f'beam centre ({z_laser/mm:.0f} mm)')
+        axs[1].set_xlabel(r'time ($\mu$s)')
+        axs[1].set_ylabel(r'photons / molecule / $\mu$s')
+        secax2 = axs[1].secondary_xaxis(
+            'top', functions=(lambda t_us: t_us*us_to_mm,
+                            lambda z_mm: z_mm/us_to_mm))
+        secax2.set_xlabel('distance (mm)')
+        axs[1].legend()
+        #fig2.savefig('photon_rate_vs_time_mcwf.png', dpi=150)
+        np.save(f"CCD_simulation_ratefile_{time_bin}_ms_{P_v1}_mW.npy", rate)
 
-    # ---------------------------------------------------------
-    # Ensemble-averaged populations vs time (X manifolds and A)
-    #fig3, ax3 = plt.subplots()
-    t_pop_us = tgrid_pop*t_to_us
-    pop_labels = [r'X($v$=0)', r'X($v$=1)', r'X($v$=2)', r'X($v$=3)', 'A']
-    for ip in range(5):
-        axs[2].plot(t_pop_us, pop_acc[:, ip], label=pop_labels[ip])
-    axs[2].axvline(z_laser/mm/us_to_mm, color='k', ls=':', lw=1)
-    axs[2].set_xlabel(r'time ($\mu$s)')
-    axs[2].set_ylabel('population')
-    axs[2].set_ylim(bottom=0.)
-    secax3 = axs[2].secondary_xaxis(
-        'top', functions=(lambda t_us: t_us*us_to_mm,
-                        lambda z_mm: z_mm/us_to_mm))
-    secax3.set_xlabel('distance (mm)')
-    axs[2].legend()
-    plt.tight_layout()
-    fig.savefig(f'MCWF_{time_bin}ms_{P_v1}mW.png', dpi=150)
+        # ---------------------------------------------------------
+        # Ensemble-averaged populations vs time (X manifolds and A)
+        #fig3, ax3 = plt.subplots()
+        t_pop_us = tgrid_pop*t_to_us
+        pop_labels = [r'X($v$=0)', r'X($v$=1)', r'X($v$=2)', r'X($v$=3)', 'A']
+        for ip in range(5):
+            axs[2].plot(t_pop_us, pop_acc[:, ip], label=pop_labels[ip])
+        axs[2].axvline(z_laser/mm/us_to_mm, color='k', ls=':', lw=1)
+        axs[2].set_xlabel(r'time ($\mu$s)')
+        axs[2].set_ylabel('population')
+        axs[2].set_ylim(bottom=0.)
+        secax3 = axs[2].secondary_xaxis(
+            'top', functions=(lambda t_us: t_us*us_to_mm,
+                            lambda z_mm: z_mm/us_to_mm))
+        secax3.set_xlabel('distance (mm)')
+        axs[2].legend()
+        plt.tight_layout()
+        fig.savefig(f'MCWF_{time_bin}ms_{P_v1}mW.png', dpi=150)
 
-    plt.show()
+        elapsed = time.time() - t_begin
+        print(f"\nThis took {elapsed} s to run")
+        return (time_bin, P_v1, photons.mean(), elapsed)
+    except Exception as e:
+        print(e)
 
-    print(f"\nThis took {time.time() - t_begin} s to run")
 
 def main():
-    run(17.7, 38)
+    N_WORKERS = 4
+    P_v1_values = [0, 6, 11]
+    tb_values = [8.46, 13.08, 17.7]
+    combs = list(product(tb_values, P_v1_values))
+
+
+    t0 = time.time()
+    with Pool(processes=N_WORKERS) as pool:
+        for t, P, N, e in pool.imap_unordered(run, combs):
+            print(f"Finished worker Pv1={P}W, bin={t}s with Np={N:.4f} elapsed {e:.1f} s")
+    print(f"All {len(combs)} tasks finished in {time.time() - t0:.1f} s")
+
 
 if __name__=="__main__":
     main()

@@ -5,38 +5,51 @@ from matplotlib import rc
 from matplotlib.ticker import MultipleLocator
 from scipy.interpolate import UnivariateSpline
 from scipy.optimize import curve_fit
+import pandas as pd
 
 v1 = np.array([10, 30, 44, 100])
 mu = np.array([27, 37.2, 36.4, 49.1])
 mu /= 14
 
 
-port_a_power = np.array([6, 11, 21.7, 30, 34, 38, 44])
-r_measured_8_46 = np.array([1.2, 1.3, 1.45, 1.45, 1.6, 1.6, 1.65])
-r_measured_13_09 = np.array([1.3, 1.4, 1.7, 1.75, 1.9, 1.9, 2])
-r_measured_17_7 = np.array([1.45, 1.65, 1.95, 2.14, 2.3, 2.3, 2.4])
-r_measured_22_32 = np.array([1.55, 1.8, 2.25, 2.45, 2.6, 2.6, 2.73])
-r_measured_26_94 = np.array([1.66, 1.95, 2.45, 2.7, 2.9, 2.95, 3.05])
-r_measured_31_56 = np.array([1.85, 2.2, 2.75, 3.1, 3.25, 3.3, 3.5])
+
+power = [6, 11, 21.7, 30, 34, 38, 44]
+t = [8.46, 13.08, 17.7, 22.32, 26.94, 31.56]
+r_measured = pd.DataFrame(np.nan, index=t, columns=power)
+r_measured.loc[8.46] = [1.2, 1.3, 1.45, 1.45, 1.6, 1.6, 1.65]
+r_measured.loc[13.08] = [1.3, 1.4, 1.7, 1.75, 1.9, 1.9, 2]
+r_measured.loc[17.7] = [1.45, 1.65, 1.95, 2.14, 2.3, 2.3, 2.4]
+r_measured.loc[22.32] = [1.55, 1.8, 2.25, 2.45, 2.6, 2.6, 2.73]
+r_measured.loc[26.94] = [1.66, 1.95, 2.45, 2.7, 2.9, 2.95, 3.05]
+r_measured.loc[31.56] = [1.85, 2.2, 2.75, 3.1, 3.25, 3.3, 3.5]
 
 
+sim = pd.DataFrame(np.nan, index=t, columns=power)
+sim.loc[:,0] = np.nan
 
-power_sim_31_56 = np.array([15, 30])
-val_0_31_56 = 13.4
-vals_31_56 = np.array([40.3, 51.9])
+# Set values here: sim.loc[tb, power]
+sim.loc[31.56, 44] = 57.7
+sim.loc[8.46, 44.0] = 17.8
+sim.loc[31.56, 0] = 15.4
+sim.loc[31.56, 6] = 33.1
+sim.loc[31.56, 21.7] = 45.2
+sim.loc[8.46, 0] = 11.4
+sim.loc[17.7, 0] = 14.5
+sim.loc[8.46, 6] = 13.7
+sim.loc[8.46, 21.7] = 16.4
+sim.loc[17.7, 44] = 32.7
+sim.loc[17.7, 21.7] = 29.8
+sim.loc[8.46, 38] = 16.9
+sim.loc[13.08, 38] = 24.1
+sim.loc[17.7, 6] = 19.2
+sim.loc[17.7, 38] = 31.9
 
-val_0_8_46 = 11.6
-power_sim_8_46 = np.array([30])
-vals_8_46 = np.array([19.3])
 
-power_sim_22_32 = np.array([44])
-val_0_22_32 = 15.2
-vals_22_32 = np.array([46.6])
-
-r_31 = vals_31_56 / val_0_31_56
-r_8 = vals_8_46 / val_0_8_46
-r_22 = vals_22_32 / val_0_22_32
-
+print(sim)
+sim_r = sim
+for i in range(len(sim.iloc[:,0])):
+    sim_r.iloc[i,0:-1] = sim_r.iloc[i,0:-1] / sim_r.iloc[i,-1]
+sim_r.drop(columns=0, inplace=True)
 
 def sqrt_model(x, a, b, c):
     return a * np.sqrt(x + b) + c
@@ -57,16 +70,20 @@ plt.rcParams.update({
 # ---------------- Plot 1 ----------------
 fig, ax = plt.subplots()
 
-ax.plot(port_a_power, r_measured_8_46, label="Measured, 8.46ms", color="tab:purple", marker="x")
-ax.plot(port_a_power, r_measured_13_09, label="Measured, 13.08ms", color="tab:blue", marker="x")
-ax.plot(port_a_power, r_measured_17_7, label="Measured, 17.7ms", color="tab:cyan", marker="x")
-ax.plot(port_a_power, r_measured_22_32, label="Measured, 22.32ms", color="tab:green", marker="x")
-ax.plot(port_a_power, r_measured_26_94, label="Measured, 26.94ms", color="tab:orange", marker="x")
-ax.plot(port_a_power, r_measured_31_56, label="Measured, 31.56ms", color="tab:red", marker="x")
+ax.plot(power, r_measured.loc[8.46], label="Measured, 8.46ms", color="tab:purple", marker="x")
+ax.plot(power, r_measured.loc[13.08], label="Measured, 13.08ms", color="tab:blue", marker="x")
+ax.plot(power, r_measured.loc[17.7], label="Measured, 17.7ms", color="tab:cyan", marker="x")
+ax.plot(power, r_measured.loc[22.32], label="Measured, 22.32ms", color="tab:green", marker="x")
+ax.plot(power, r_measured.loc[26.94] , label="Measured, 26.94ms", color="tab:orange", marker="x")
+ax.plot(power, r_measured.loc[31.56], label="Measured, 31.56ms", color="tab:red", marker="x")
 
-ax.scatter(power_sim_31_56, r_31, label="Simulation, 31.56ms", color="tab:red", marker="o", zorder=5)
-ax.scatter(power_sim_8_46, r_8, label="Simulation, 8.46ms", color="tab:purple", marker="o", zorder=5)
-ax.scatter(power_sim_22_32, r_22, label="Simulation, 22.32ms", color="tab:green", marker="o", zorder=5)
+ax.scatter(power, sim_r.loc[8.46], label="Simulation, 8.46ms", color="tab:purple", marker="o", edgecolors="black", linewidths=0.5)
+ax.scatter(power, sim_r.loc[13.08], label="Simulation, 13.08ms", color="tab:blue", marker="o", edgecolors="black", linewidths=0.5)
+ax.scatter(power, sim_r.loc[17.7], label="Simulation, 17.7ms", color="tab:cyan", marker="o", edgecolors="black", linewidths=0.5)
+ax.scatter(power, sim_r.loc[22.32], label="Simulation, 22.32ms", color="tab:green", marker="o", edgecolors="black", linewidths=0.5)
+ax.scatter(power, sim_r.loc[26.94] , label="Simulation, 26.94ms", color="tab:orange", marker="o", edgecolors="black", linewidths=0.5)
+ax.scatter(power, sim_r.loc[31.56], label="Simulation, 31.56ms", color="tab:red", marker="o",edgecolors="black", linewidths=0.5)
+
 
 ax.set_ylim(1, 5)
 ax.set_xlim(5, 45)
@@ -81,56 +98,34 @@ ax.yaxis.set_minor_locator(MultipleLocator(0.1))
 ax.tick_params(which='minor', length=4, width=0.8)
 ax.tick_params(which='major', length=7, width=1.2)
 
-ax.legend(fontsize=8)
+ax.legend(fontsize=8, ncol=2)
 ax.set_title("CCD A Ratio from Det A V1 On/Off with simulation")
 
 
 
 # ---------------- Plot 2 ----------------
-bin_time = np.array([8.46, 13.08, 17.7, 22.32, 26.94, 31.56])
-r_measured_6 = np.array([1.2, 1.3, 1.5, 1.6, 1.7, 1.85])
-r_measured_11 = np.array([1.3, 1.4, 1.7, 1.85, 2, 2.2])
-r_measured_21_7 = np.array([1.45, 1.65, 2, 2.3, 2.45, 2.7])
-r_measured_30 = np.array([1.45, 1.75, 2.1, 2.45, 2.7, 3.05])
-r_measured_34 = np.array([1.55, 1.9, 2.25, 2.7, 2.9, 3.25])
-r_measured_38 = np.array([1.55, 1.9, 2.25, 2.72, 2.95, 3.3])
-r_measured_44 = np.array([1.62, 1.95, 2.4, 2.8, 3.1, 3.4])
 
-
-power_sim_31_56 = np.array([30])
-val_0_31_56 = 13.4
-vals_31_56 = np.array([51.9])
-
-val_0_8_46 = 11.6
-power_sim_8_46 = np.array([30])
-vals_8_46 = np.array([19.3])
-
-
-
-
-sim_bins = np.array([8.46, 22.32, 31.56])
-
-
-
-powers_30_w = np.array([19.3/val_0_8_46, np.nan, 51.9/val_0_31_56])
-powers_14_w = np.array([np.nan, np.nan, 40.3/val_0_31_56])
-powers_44_w = np.array([np.nan, 46.6/val_0_22_32, np.nan])
 
 datasets = [
-    (r_measured_6, "6mW", "tab:red"),
-    (r_measured_11, "11mW", "tab:orange"),
-    (r_measured_21_7, "21.7mW", "tab:olive"),
-    (r_measured_30, "30mW", "tab:green"),
-    (r_measured_34, "34mW", "tab:cyan"),
-    (r_measured_38, "38mW", "tab:blue"),
-    (r_measured_44, "44mW", "tab:purple"),
+    (r_measured.loc[:,6], "6 mW", "tab:red"),
+    (r_measured.loc[:,11], "11 mW", "tab:orange"),
+    (r_measured.loc[:,21.7], "21.7 mW", "tab:olive"),
+    (r_measured.loc[:,30], "30 mW", "tab:green"),
+    (r_measured.loc[:,34], "34 mW", "tab:cyan"),
+    (r_measured.loc[:,38], "38 mW", "tab:blue"),
+    (r_measured.loc[:,44], "44 mW", "tab:purple"),
 ]
 
 fig, ax = plt.subplots()
 
-ax.scatter(sim_bins, powers_14_w, label="Simulation, 15mW", color="tab:orange", marker="v", zorder=5, s=50)
-ax.scatter(sim_bins, powers_30_w, label="Simulation, 30mW", color="tab:green", marker="v", zorder=5, s=50)
-ax.scatter(sim_bins, powers_44_w, label="Simulation, 44mW", color="tab:purple", marker="v", zorder=5, s=50)
+
+ax.scatter(t, sim_r.loc[:,6], label="Simulation, 6 mW", color="tab:red", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
+ax.scatter(t, sim_r.loc[:,11], label="Simulation, 11 mW", color="tab:orange", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
+ax.scatter(t, sim_r.loc[:,21.7], label="Simulation, 21.7 mW", color="tab:olive", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
+ax.scatter(t, sim_r.loc[:,30], label="Simulation, 30 mW", color="tab:green", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
+ax.scatter(t, sim_r.loc[:,34], label="Simulation, 34 mW", color="tab:cyan", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
+ax.scatter(t, sim_r.loc[:,38], label="Simulation, 38 mW", color="tab:blue", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
+ax.scatter(t, sim_r.loc[:,44], label="Simulation, 44 mW", color="tab:purple", marker="v", zorder=5, s=50, edgecolors="black", linewidths=0.5)
 
 x_fit = np.linspace(5, 34, 100)
 for data, label, color in datasets:
@@ -153,7 +148,7 @@ ax.yaxis.set_minor_locator(MultipleLocator(0.1))
 ax.tick_params(which='minor', length=4, width=0.8)
 ax.tick_params(which='major', length=7, width=1.2)
 
-ax.legend(fontsize=8)
+ax.legend(fontsize=8, ncol=2)
 ax.set_title("CCD A Ratio from Det A V1 On/Off with simulation")
 
 plt.show()
