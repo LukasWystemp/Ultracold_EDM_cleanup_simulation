@@ -121,6 +121,27 @@ P_p1 = 105e-3
 linewidth_p1_Hz = 754e3
 linewidth_v1_Hz = 541e3
 
+# --------------------------------------------------------------------
+# Q(1) clean-up laser: X(v=0, N=1) -> A(v'=0, J'=3/2, +parity).
+# NOTE (physics): J'=3/2 with I=1/2 gives F' = 1, 2 (8 states), NOT F'=0,1.
+# The A(J'=3/2) hyperfine span here is only ~1.9 MHz << Gamma/2pi = 5.7 MHz,
+# so all sidebands address both F' levels regardless.
+# The (+)-parity component is the one reachable from X(N=1, -); it decays
+# to N=1 (70%, recycled) and N=3 (30%, permanent rotational loss), and is
+# parity-forbidden to decay to N=0 -- so microwave-shelved N=0 molecules
+# pass through Q1 untouched.
+Q1_ON = True
+w_q1 = 552.294e-9
+k_q1 = w_p1/w_q1                 # in sim units (k_p1 = 1)
+P_q1 = 30e-3                     # W  TODO: set experimental Q1 power
+frac_q1 = np.array([1., 1., 1., 1.])   # equal power per hyperfine sideband
+det_q1 = 0.0
+linewidth_q1_Hz = 754e3          # TODO: measured Q1 linewidth
+D_Q1 = 25*mm                     # Q1 beam centre distance behind P1/V1 centre
+MW_OFF_FRAC = 0.5                # MW switch-off at z_laser + frac*D_Q1
+z_laser_q1 = z_laser + D_Q1
+z_mw_off = z_laser + MW_OFF_FRAC*D_Q1
+
 
 
 # --------------------------------------------------------------------
@@ -151,21 +172,14 @@ H0_A, Bq_A, Abasis = pylcp.hamiltonians.XFmolecules.Astate(
     muB=cts.value('Bohr magneton in Hz/T')/1e6*1e-4, return_basis=True
     )
 
-# ------------------------------------------------
-# Q(1)
-H0_N3, Bq_XN3, U_XN3, X_basesN3 = pylcp.hamiltonians.XFmolecules.Xstate(
-    N=3, I=1/2, B=7233.8271, gamma=-13.41679,
-    b=(170.26374-85.4208/3), 
-    c=85.4208, CI=0.02038, q0=0, q2=0,
-    gS=2.0023193043622, gI=0.,
-    muB=cts.value('Bohr magneton in Hz/T')/1e6*1e-4, return_basis=True
-    )
-
-H0_A2, Bq_A2, Abasis2 = pylcp.hamiltonians.XFmolecules.Astate(
+# A^2Pi_1/2 (v'=0, J'=3/2, +parity) for the Q(1) clean-up laser.
+# F' = 1 (3 states) and F' = 2 (5 states); span ~1.9 MHz.
+H0_A2, Bq_A2, A2basis = pylcp.hamiltonians.XFmolecules.Astate(
     J=3/2, I=1/2, P=+1, a=(3/2*4.8), glprime=-3*.0211,
     muB=cts.value('Bohr magneton in Hz/T')/1e6*1e-4, return_basis=True
     )
-n_A2 = H0_A2.shape[0] # 8
+n_A2 = H0_A2.shape[0]            # 8
+
 
 # -----------------------------------------------------------
 # Microwaves
@@ -174,7 +188,7 @@ MW_PRE_EVOLVE = True
 
 pol_mw = np.array([0., 1., 1.])/np.sqrt(2.)
 det_mw_kHz = 0.0
-Omega_mw_kHz = 200.
+Omega_mw_kHz = 100.
 
 H0_N0, Bq_N0, U_N0, N0basis = pylcp.hamiltonians.XFmolecules.Xstate(
     N=0, I=1/2, B=7233.8271, gamma=-13.41679,
@@ -210,8 +224,14 @@ def _dq_rotational(bas_u, bas_l, U_u, U_l):
 
 
 
-def build_ham(v_list, d_blk, H_N0_frame, with_N0):
-    """pyLCP hamiltonian containing the X(v) manifolds in v_list + A."""
+def build_ham(v_list, d_blk, H_N0_frame, with_N0, d2_blk=None):
+    """pyLCP hamiltonian containing the X(v) manifolds in v_list + A
+    (+ A2 = A(J'=3/2,+) if d2_blk is given). Block order fixes the state
+    indexing: X(v)..., N0, A, A2.
+    NOTE: the X<->A2 d_q blocks omit the N=3 decay channel (not in the
+    basis), so pylcp's own decay out of A2 is incomplete (0.7*Gamma);
+    this only matters if A2 is populated inside pylcp (rateeq/obe). The
+    MCWF handles the N=3 loss exactly via an explicit jump channel."""
     hm = pylcp.hamiltonian(mass=mass)
     for v in v_list:
         hm.add_H_0_block(f'X{v}', H0_X[v]/gamma_MHz)
@@ -224,6 +244,12 @@ def build_ham(v_list, d_blk, H_N0_frame, with_N0):
     ks = {0: 1., 1: k_v1, 2: w_p1/583e-9, 3: w_p1/600e-9}
     for v in v_list:
         hm.add_d_q_block(f'X{v}', 'A', d_blk[v], k=ks[v])
+    if d2_blk is not None:
+        hm.add_H_0_block('A2', H0_A2/gamma_MHz)
+        hm.add_mu_q_block('A2', Bq_A2/gamma_MHz)
+        ks2 = {0: k_q1, 1: k_v1, 2: w_p1/583e-9, 3: w_p1/600e-9}
+        for v in v_list:
+            hm.add_d_q_block(f'X{v}', 'A2', d2_blk[v], k=ks2[v])
     return hm
 
 
@@ -242,11 +268,12 @@ def crossed_beam_s(s_max, wb, zc):
 POL_EOM = (np.array([0., 1., 1.])/np.sqrt(2.), 
            np.array([0., 1., -1.])/np.sqrt(2.))
 
-def beam_pair(k, s_arr, deltas, s_scale=1.0):
+def beam_pair(k, s_arr, deltas, s_scale=1.0, zc=z_laser):
     """Each physical beam is entered twice, once per EOM polarisation
     state (pol group 0 = y-hat, 1 = z-hat). In the MCWF the two are
     gated on/off in antiphase (square wave); for the rate-equation
-    reference use s_scale=0.5 with both on, i.e. the time average."""
+    reference use s_scale=0.5 with both on, i.e. the time average.
+    zc: beam-centre position along z (Q1 sits at z_laser_q1)."""
     beams = []
     s_arr = np.broadcast_to(np.asarray(s_arr, float), np.shape(deltas))
     for delta, s_max in zip(deltas, s_arr):
@@ -258,7 +285,7 @@ def beam_pair(k, s_arr, deltas, s_scale=1.0):
                               'pol_coord': 'cartesian',
                               'delta': delta,
                               's': crossed_beam_s(s_scale*s_dir,
-                                                  w_beam, z_laser)})
+                                                  w_beam, zc)})
 
     return pylcp.laserBeams(beams)
 
@@ -277,7 +304,7 @@ def hf_levels(H0):
 # -----------------------------------------------------------------------
 # Geometry
 # Velocity distribution
-L_flight = 3.8
+L_flight = 3.5
 
 sigma_vx = np.sqrt(cts.k *T_t / m_YbF)
 sigma_vx_sim = sigma_vx/v_unit
@@ -315,11 +342,17 @@ def sample_transverse(rng, v_f_SI):
 # reference position, and verify numerically that the block evolves as
 # M_b * exp(i*delta*t) (pyLCP fields carry exp(+i delta t)).
 
-def extract_beam_blocks(key_row, laserBeams, ham, H_static, Bq_sph, iA, n_A, x0, y0=0.):
-    """Coupling blocks for all beams at transverse position x0 (peak env)."""
-    r_ref = np.array([x0, y0, z_laser])
-    Ms, rows, dels, kxs = [], [], [], []
-    for key, roff in key_row.items():
+def extract_beam_blocks(key_cfg, laserBeams, ham, H_static, Bq_sph, x0, y0=0.):
+    """Coupling blocks for all beams at transverse position x0 (peak env).
+
+    key_cfg: key -> (row_offset, col_offset, n_col, zc_beam). Each beam's
+    block is evaluated at its own beam centre (peak of its envelope);
+    blocks are zero-padded to the widest excited manifold. Returns per-beam
+    (Ms, rows, cols, ncols, dels, kxs, zcs)."""
+    ncmax = max(cfg[2] for cfg in key_cfg.values())
+    Ms, rows, cols, ncols, dels, kxs, zcs = [], [], [], [], [], [], []
+    for key, (roff, coff, ncol, zc) in key_cfg.items():
+        r_ref = np.array([x0, y0, zc])
         for beam in laserBeams[key].beam_vector:
             Eq = zero_Eq(laserBeams)
             Eq[key] = beam.electric_field(r_ref, 0.)
@@ -327,23 +360,31 @@ def extract_beam_blocks(key_row, laserBeams, ham, H_static, Bq_sph, iA, n_A, x0,
             # gamma*d_q/4 * E (verified to reproduce the textbook
             # (s/2)/(1+s) saturation), whereas return_full_H uses d_q/2.
             M0 = 0.5*(ham.return_full_H(Eq, Bq_sph) - H_static)[roff:roff+n_X,
-                                                                iA:iA+n_A]
+                                                                coff:coff+ncol]
             # verify time dependence M(t) = M0 * exp(+i delta t)
             t_test = 0.31
             Eq[key] = beam.electric_field(r_ref, t_test)
             M1 = 0.5*(ham.return_full_H(Eq, Bq_sph) - H_static)[roff:roff+n_X,
-                                                                iA:iA+n_A]
+                                                                coff:coff+ncol]
             assert np.allclose(M1, M0*np.exp(1j*beam_delta(beam)*t_test),
                                atol=1e-10), "beam phase convention changed"
-            Ms.append(M0)
+            Mp = np.zeros((n_X, ncmax), dtype=complex)
+            Mp[:, :ncol] = M0
+            Ms.append(Mp)
             rows.append(roff)
+            cols.append(coff)
+            ncols.append(ncol)
             dels.append(beam_delta(beam))
 
             kv = beam.kvec(r_ref, 0.) if callable(beam.kvec) else beam.kvec
             kxs.append(float(kv[0]))
+            zcs.append(zc)
     return (np.array(Ms), np.array(rows, dtype=np.int64),
+            np.array(cols, dtype=np.int64),
+            np.array(ncols, dtype=np.int64),
             np.array(dels, dtype=np.float64),
-            np.array(kxs, dtype=np.float64))
+            np.array(kxs, dtype=np.float64),
+            np.array(zcs, dtype=np.float64))
 
 
 def beam_delta(beam):
@@ -353,16 +394,25 @@ def zero_Eq(laserBeams):
     return {k: np.zeros(3, dtype=complex) for k in laserBeams}
 
 @njit(cache=True)
-def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
-         phL, env, out):
-    """out = -i H_eff(t) psi, with per-colour laser phases phL[0:2].
+def _rhs(t, psi, Hs, Mb, rows, cols, ncols, dels, colour, polgrp, om_pol,
+         ph0, cosb, sinb, phL, vfw, zcs, y0, vy, sig, Cmw, imw, t_mw_off,
+         out):
+    """out = -i H_eff(t) psi, with per-colour laser phases phL[0:3].
 
     Smooth EOM Switching: E(t) = cosb*E1 + e^{i \phi(t)}*sinb*E2, with
     E1, E2 the two beams polarised along e1,2 = 1/\sqrt{2}(\hat{y} + \hat{z})
     (pol gropus 0 and 1)
     \phi(t) = om_pol*t + ph0
     b = \pi/4 for the perfect cycle
-    """
+
+    Beam b couples ground rows rows[b].. to excited columns
+    cols[b]..cols[b]+ncols[b], with its own Gaussian envelope centred at
+    zcs[b]; the molecule is at z = vfw*t, y = y0 + vy*t.
+
+    Static RWA microwave block Cmw (X0 rows <-> N0 at imw) is applied
+    while t < t_mw_off (pass t_mw_off < 0 to disable): the MW field is
+    spatially uniform and simply switched off before the molecules reach
+    the Q1 beam."""
     n = psi.shape[0]
     # H_static \psi
     for i in range(n):
@@ -370,9 +420,24 @@ def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
         for j in range(n):
             acc += Hs[i, j]*psi[j]
         out[i] = acc
+    # microwaves (time-gated, spatially uniform)
+    if t < t_mw_off:
+        for i in range(Cmw.shape[0]):
+            acc = 0.+0.j
+            for j in range(Cmw.shape[1]):
+                acc += Cmw[i, j]*psi[imw+j]
+            out[i] += acc
+        for j in range(Cmw.shape[1]):
+            acc = 0.+0.j
+            for i in range(Cmw.shape[0]):
+                acc += np.conj(Cmw[i, j])*psi[i]
+            out[imw+j] += acc
+    z = vfw*t
+    y = y0 + vy*t
     nb = Mb.shape[0]
-    nA0 = Hs.shape[0] - 4
     for b in range(nb):
+        dz = z - zcs[b]
+        env = np.exp(-0.25*(dz*dz + y*y)/(sig*sig))
         c = env*np.exp(1j*(dels[b]*t + phL[colour[b]]))
         if om_pol > 0.:
             ph = om_pol*t + ph0
@@ -381,17 +446,19 @@ def _rhs(t, psi, Hs, Mb, rows, dels, colour, polgrp, om_pol, ph0, cosb, sinb,
             else:
                 c *= sinb*(np.cos(0.5*ph) + 1j*np.sin(0.5*ph))
         ro = rows[b]
+        co = cols[b]
+        nc = ncols[b]
         for i in range(Mb.shape[1]):
             acc = 0.+0.j
-            for j in range(4):
-                acc += Mb[b, i, j]*psi[nA0+j]
+            for j in range(nc):
+                acc += Mb[b, i, j]*psi[co+j]
             out[ro+i] += c*acc
         cc = np.conj(c)
-        for j in range(4):
+        for j in range(nc):
             acc = 0.+0.j
             for i in range(Mb.shape[1]):
                 acc += np.conj(Mb[b, i, j])*psi[ro+i]
-            out[nA0+j] += cc*acc
+            out[co+j] += cc*acc
     for i in range(n):
         out[i] *= -1j
     return out
@@ -709,7 +776,7 @@ def run_validation(d_blk, laserBeams, deltas_p1, magField, Bq_sph, n_A, log):
 
 
 def vec_to_mag(v):
-    return np.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    return (v[0]**2 + v[1]**2 + v[2]**2)/np.sqrt(3)
 
 def run(inp):
     try:
@@ -722,11 +789,11 @@ def run(inp):
         log.append(f"Geometry: R_s = {R_s} m, d = {d_ap} m, R_ap = {R_ap_SI} m, r_s = {r_source} m")
         
         # Setup
-        time_bin, P_v1, B_s = inp
+        time_bin, P_v1 = inp
         V1_ON = False if np.isclose(np.array([P_v1]), np.array([0.])) else True
         time_bin *= 1e-3
         P_v1 *= 1e-3
-        print(f"Started worker {time_bin*1e3} ms | PV1: {P_v1*1e3} mW | B: {B_s} G")
+        print(f"Started worker {time_bin*1e3} ms | PV1: {P_v1*1e3} mW")
         log.append(f"\nTime bin: {time_bin*1e3} ms | PV1: {P_v1*1e3} mW\n")
 
         s_p1 = power_to_s(P_p1, frac_p1, sigma_m, w_p1)
@@ -815,13 +882,10 @@ def run(inp):
         idx_N0F1_loc = np.where(_diagN0 == E_N0F1_MHz)[0]    # within the 4-block
         assert len(idx_N0F1_loc) == 3, "N=0 F=1 manifold not found"
 
-        _blk_mw = C_mw[np.ix_(idx_mw_target, idx_N0F1_loc)] #pick 3x3 block connecting N=1,F=1,mF=-1,0,1 manifold to N=0F=1,mF=-1,0,1
-        _sv_mw = np.linalg.svd(_blk_mw, compute_uv=False)
-        _C_sv = float(_sv_mw[0])
-        #_C_maxel = float(np.abs(_blk_mw).max())
-        #_C_tgt = np.abs(_blk_mw).max() # pick 3x3 block connecting N=1,F=1,mF=-1,0,1 manifold to N=0F=1,mF=-1,0,1 
-        assert _C_sv > 1e-6, "addressed sub-block is dipole-forbidden"
-        C_mw *= 0.5*Omega_mw_G/_C_sv
+        _blk_mw = C_mw[np.ix_(idx_mw_target, idx_N0F1_loc)]
+        _C_tgt = np.abs(_blk_mw).max() # pick 3x3 block connecting N=1,F=1,mF=-1,0,1 manifold to N=0F=1,mF=-1,0,1 
+        assert _C_tgt > 1e-6, "addressed sub-block is dipole-forbidden"
+        C_mw *= 0.5*Omega_mw_G/_C_tgt
 
         det_mw_G = det_mw_kHz*1e-3/gamma_MHz
         H_N0_frame = (H0_N0/gamma_MHz + (E_mw_target_MHz - E_N0F1_MHz)/gamma_MHz*np.eye(n_N0)
@@ -885,9 +949,9 @@ def run(inp):
                 f"frac={frac_v1[i]/np.sum(frac_v1):.3f}  s={s_v1[i]:.1f}")
 
 
-        #B_vec = np.array([0.08, -0.13, 0.1]) # in Gauss
-        B_vec = np.array([1, 0, 1])/np.sqrt(3)
-        B_vec *= B_s
+        B_vec = np.array([0.08, -0.13, 0.1]) # in Gauss
+        #B_vec = np.array([1, 0, 1])/np.sqrt(3)
+        #B_vec *= B_s
         magField = pylcp.constantMagneticField(B_vec)
         Bq_sph = cart2spherical(B_vec)
         log.append(f"B field {vec_to_mag(B_vec)} Gauss")
@@ -1061,7 +1125,7 @@ def run(inp):
                 label=f'mean = {photons.mean():.1f}')
         axs[0].set_xlabel('photons per molecule'); axs[0].set_ylabel('molecules')
         axs[0].legend(); #fig.savefig('photon_histogram_mcwf_nov1.png', dpi=150)
-        axs[0].set_title(f"Time bin {time_bin*1e3} | V1 Power {P_v1*1e3} mW | B_S {B_s} G")
+        axs[0].set_title(f"Time bin {time_bin*1e3} | V1 Power {P_v1*1e3} mW | ")
 
         # ---------------------------------------------------------
         # Photon emission rate vs time / distance (what a CCD along z sees).
@@ -1088,7 +1152,7 @@ def run(inp):
         secax2.set_xlabel('distance (mm)')
         axs[1].legend()
         #fig2.savefig('photon_rate_vs_time_mcwf.png', dpi=150)
-        np.save(f"CCD_simulation_ratefile_{time_bin}_ms_{P_v1}_mW_B_s_{B_s}_G.npy", rate)
+        np.save(f"CCD_simulation_ratefile_{time_bin}_ms_{P_v1}_mW.npy", rate)
 
         # ---------------------------------------------------------
         # Ensemble-averaged populations vs time (X manifolds and A)
@@ -1107,22 +1171,21 @@ def run(inp):
         secax3.set_xlabel('distance (mm)')
         axs[2].legend()
         plt.tight_layout()
-        fig.savefig(f'MCWF_{time_bin}ms_{P_v1}mW.png_B_s_{B_s}_G', dpi=150)
+        fig.savefig(f'MCWF_{time_bin}ms_{P_v1}mW.png', dpi=150)
 
         elapsed = time.time() - t_begin
         log.append(f"\nThis took {elapsed} s to run")
-        return ("ok", time_bin, P_v1, B_s, photons.mean(), elapsed, log)
+        return ("ok", time_bin, P_v1, photons.mean(), elapsed, log)
     except Exception as e:
         return ("err", inp, traceback.format_exc())
 
 
 
 def main():
-    N_WORKERS = 80
+    N_WORKERS = 1
     P_v1_values = [0, 6, 21.7, 38, 44]
     tb_values = [8.46, 17.7, 22.32, 31.56]
-    B_field = [0, 0.2, 0.5, 1]
-    combs = list(product(tb_values, P_v1_values, B_field))
+    combs = list(product(tb_values, P_v1_values))
     print(combs)
 
     results = []
@@ -1132,9 +1195,9 @@ def main():
             if res[0] == "err":
                 print(f"FAILED {res[1]}:\n{res[2]}")
                 continue
-            _, t, P, B, N, e, log = res
+            _, t, P, N, e, log = res
             print("\n".join(log))
-            print(f"Finished worker Pv1={P}W, bin={t}s, B={B}G with Np={N:.4f} elapsed {e:.1f} s")
+            print(f"Finished worker Pv1={P}W, bin={t}s, with Np={N:.4f} elapsed {e:.1f} s")
             results.append({"P-V1": P, "bin": t, "Np": N})
     print(f"All {len(combs)} tasks finished in {time.time() - t0:.1f} s")
     for i in range(len(results)):
